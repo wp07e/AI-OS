@@ -37,6 +37,56 @@
       "type": "remote",
       "url": "https://mcp.canva.com/mcp",
       "enabled": true
+    },
+    // xAI Grok MCP — bundled Python server, pre-synced in the image at
+    // /app/mcps/grok-mcp. `uv run` reuses the baked venv. The XAI_API_KEY
+    // is injected at runtime via env (see docker-compose.yml / .env).
+    "grok": {
+      "type": "local",
+      "command": [
+        "uv",
+        "--directory",
+        "/app/mcps/grok-mcp",
+        "run",
+        "python",
+        "main.py"
+      ],
+      "enabled": true,
+      "environment": {
+        "XAI_API_KEY": "{env:XAI_API_KEY}"
+      }
+    },
+    // Sequential-thinking MCP — pure npx, no install step required.
+    "sequentialthinking": {
+      "type": "local",
+      "command": [
+        "npx",
+        "-y",
+        "@modelcontextprotocol/server-sequential-thinking"
+      ],
+      "enabled": true,
+      "timeout": 60000
+    },
+    // Layerre MCP — bundled Python server, pre-synced in the image at
+    // /app/mcps/layerre-mcp. Given a Canva share URL, the agent can import
+    // the design as a template, edit layers, and render custom variants.
+    // `uv run` reuses the baked venv. The LAYERRE_API_KEY is injected at
+    // runtime via env (see docker-compose.yml / .env).
+    "layerre": {
+      "type": "local",
+      "command": [
+        "uv",
+        "--directory",
+        "/app/mcps/layerre-mcp",
+        "run",
+        "python",
+        "main.py"
+      ],
+      "enabled": true,
+      "environment": {
+        "LAYERRE_API_KEY": "{env:LAYERRE_API_KEY}",
+        "UV_PROJECT_ENVIRONMENT": "/app/mcps/layerre-mcp/.venv"
+      }
     }
   }
 }

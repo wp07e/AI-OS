@@ -1,0 +1,13 @@
+[project]
+name = "mcp-layerre"
+version = "1.0.0"
+description = "MCP server for the Layerre API (Canva design → template → variant rendering)"
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = ["mcp", "layerre", "canva"]
+dependencies = [
+    "mcp[cli]>=1.13.1",
+    "httpx>=0.28.1",
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.9.0",
+]

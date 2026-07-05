@@ -54,6 +54,20 @@ RUN apt-get update \
       iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
+# uv — Python package runner used to launch the Grok MCP. The installer ships
+# a static binary; we drop it into /usr/local/bin so the non-root appuser gets
+# it on PATH. uv fetches its own managed CPython; we point the install dir at
+# a system-wide, world-readable path so the baked interpreter is reusable by
+# every user without re-downloading.
+ADD https://astral.sh/uv/install.sh /tmp/uv-installer.sh
+RUN sh /tmp/uv-installer.sh \
+ && cp /root/.local/bin/uv  /usr/local/bin/uv \
+ && cp /root/.local/bin/uvx /usr/local/bin/uvx 2>/dev/null || true \
+ && rm -rf /root/.local /tmp/uv-installer.sh
+ENV UV_LINK_MODE=copy \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    PYTHONUNBUFFERED=1
+
 # Carry over the globally-installed npm packages (opencode-ai, mcp-remote)
 # and the npm cache so `npx mcp-remote` is instant on first user launch.
 COPY --from=deps /usr/local/lib/node_modules /usr/local/lib/node_modules
@@ -70,6 +84,43 @@ COPY entrypoint.sh ${APP_DIR}/entrypoint.sh
 COPY opencode.jsonc ${APP_DIR}/opencode.jsonc
 COPY skills/        ${APP_DIR}/skills/
 COPY fixtures/      ${APP_DIR}/fixtures/
+
+# ─── Grok MCP ──────────────────────────────────────────────────────────────
+# Bundled Python MCP server (xAI Grok). Source lives in the image at
+# /app/mcps/grok-mcp. The venv is pre-synced here, in the runtime stage, so
+# the recorded interpreter matches the image uv will use at first launch
+# (uv-created venvs are not portable across base images). uv fetches its own
+# managed CPython during this sync; subsequent per-user launches reuse the
+# baked venv and never touch the network for deps.
+ENV GROK_MCP_DIR=${APP_DIR}/mcps/grok-mcp
+COPY mcps/grok-mcp/pyproject.toml mcps/grok-mcp/uv.lock ${GROK_MCP_DIR}/
+COPY mcps/grok-mcp/main.py ${GROK_MCP_DIR}/
+COPY mcps/grok-mcp/src/ ${GROK_MCP_DIR}/src/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${GROK_MCP_DIR} \
+ && uv sync --frozen --no-dev \
+ && find ${GROK_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} + \
+ && chmod -R a+rX /opt/uv/python
+# Tell uv the project's environment is the baked venv and must not be
+# re-synced at runtime — keeps it usable by the non-root appuser without
+# write access.
+ENV UV_PROJECT_ENVIRONMENT=${APP_DIR}/mcps/grok-mcp/.venv \
+    UV_FROZEN=1
+
+# ─── Layerre MCP ───────────────────────────────────────────────────────────
+# Bundled Python MCP server for the Layerre API (Canva → template → variant
+# rendering). Same bake pattern as Grok: venv synced in the runtime stage so
+# the recorded interpreter matches the image uv will use at first launch.
+# At runtime opencode.jsonc overrides UV_PROJECT_ENVIRONMENT per-MCP so each
+# server reuses its own baked venv.
+ENV LAYERRE_MCP_DIR=${APP_DIR}/mcps/layerre-mcp
+COPY mcps/layerre-mcp/pyproject.toml mcps/layerre-mcp/uv.lock ${LAYERRE_MCP_DIR}/
+COPY mcps/layerre-mcp/main.py ${LAYERRE_MCP_DIR}/
+COPY mcps/layerre-mcp/src/ ${LAYERRE_MCP_DIR}/src/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${LAYERRE_MCP_DIR} \
+ && uv sync --frozen --no-dev \
+ && find ${LAYERRE_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
 
 #------------------------------------------
 # TODO: Workaround for OpenCode OAuth.

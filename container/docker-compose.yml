@@ -55,9 +55,14 @@ services:
       # OpenCode talks to LiteLLM over the shared network.
       OPENAI_BASE_URL: http://litellm:4000/v1
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # Grok MCP — xAI API key. Consumed by the bundled Grok MCP server.
+      XAI_API_KEY: ${XAI_API_KEY}
+      # Layerre MCP — Canva → template → variant rendering API key.
+      LAYERRE_API_KEY: ${LAYERRE_API_KEY}
     volumes:
       # Per-user workspace: state, OAuth token cache, generated designs.
       - ai-os-workspace:/workspace
+      - /Users/local/temp:/app/temp
     ports:
       - "19876:19877"
     # Interactive by default; `docker compose run ai-os` lands you in opencode.
