@@ -1,0 +1,30 @@
+# Dev LiteLLM config. Routes OpenCode's requests through to OpenRouter.
+#
+# Flow:  OpenCode (per-user container)
+#          →  http://litellm:4000/v1  with a per-user virtual key
+#          →  https://openrouter.ai/api/v1  with YOUR central OpenRouter key
+#
+# OpenRouter is a first-class LiteLLM backend, so we just declare the route.
+# The OpenRouter API key is read from env (never baked into this file).
+
+model_list:
+  # The model_name is what OpenCode requests (litellm/<model_name>).
+  # The litellm_params.model is the OpenRouter slug LiteLLM forwards to.
+  - model_name: default
+    litellm_params:
+      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      api_key: os.environ/OPENROUTER_API_KEY
+
+  # Optional: expose a cheaper model for low-stakes work. OpenCode can target
+  # it explicitly as litellm/fast. Comment out if you only want one route.
+  # - model_name: fast
+  #   litellm_params:
+  #     model: openrouter/anthropic/claude-3.5-haiku
+  #     api_key: os.environ/OPENROUTER_API_KEY
+
+general_settings:
+  # LiteLLM's own master key — used to administer virtual keys. Keep secret.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Optional: persist spend/usage to SQLite so per-tenant metering survives
+  # restarts. Comment in when you want budget tracking.
+  # database_url: os.environ/LITELLM_DATABASE_URL

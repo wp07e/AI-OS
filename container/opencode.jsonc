@@ -1,0 +1,42 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // OpenCode resolves its model through LiteLLM, which runs as a separate
+  // service (see docker-compose.yml). The same image works in any environment
+  // because the base URL + virtual key are injected at runtime via env.
+  "model": "litellm/default",
+  "provider": {
+    "litellm": {
+      "options": {
+        "baseURL": "{env:OPENAI_BASE_URL}",
+        "apiKey": "{env:OPENAI_API_KEY}"
+      },
+      "models": {
+        "default": {
+          "name": "litellm/default"
+        }
+      }
+    }
+  },
+  // Skills ship in the image under ./skills; expose all of them.
+  "permission": {
+    "skill": {
+      "*": "allow"
+    }
+  },
+  // Official Canva MCP server (remote, OAuth). mcp-remote bridges stdio MCP
+  // traffic to https://mcp.canva.com/mcp. On first launch the user completes
+  // an OAuth flow; the resulting token is cached in their workspace volume so
+  // subsequent launches are headless.
+
+  //     TODO: See if redirect is correctly implemented https://github.com/anomalyco/opencode/issues/33966
+  //     "oauth": {
+  //       "redirectUri": "http://127.0.0.1:25376/mcp/oauth/callback"
+  //     }
+  "mcp": {
+    "Canva": {
+      "type": "remote",
+      "url": "https://mcp.canva.com/mcp",
+      "enabled": true
+    }
+  }
+}

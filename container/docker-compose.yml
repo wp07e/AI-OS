@@ -1,0 +1,73 @@
+# Dev harness — proves the base image builds and runs end-to-end against a
+# local LiteLLM. NOT a production orchestration spec.
+#
+# `docker compose up` starts:
+#   - litellm:  the model proxy on :4000
+#   - ai-os:    one OpenCode instance (your user) reachable via attached TTY
+#
+# Production (k8s/nomad, autoscaling, telemetry) is out of scope for Phase 1.
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: ai-os-litellm
+    restart: unless-stopped
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      # The central OpenRouter key. LiteLLM holds it; containers never see it.
+      # Consumed by model_list in litellm_config.yaml (os.environ/OPENROUTER_API_KEY).
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?OPENROUTER_API_KEY is required}
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    command:
+      - "--config"
+      - "/app/config.yaml"
+      - "--port"
+      - "4000"
+    ports:
+      - "4000:4000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - ai-os-net
+
+  ai-os:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-os-base:latest
+    container_name: ai-os-user-1
+    restart: unless-stopped
+    depends_on:
+      litellm:
+        condition: service_healthy
+    environment:
+      # Per-user UID/GID — change per instance when spawning additional users.
+      APP_UID: ${APP_UID:-2000}
+      APP_GID: ${APP_GID:-2000}
+      # OpenCode talks to LiteLLM over the shared network.
+      OPENAI_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+    volumes:
+      # Per-user workspace: state, OAuth token cache, generated designs.
+      - ai-os-workspace:/workspace
+    ports:
+      - "19876:19877"
+    # Interactive by default; `docker compose run ai-os` lands you in opencode.
+    stdin_open: true
+    tty: true
+    networks:
+      - ai-os-net
+
+volumes:
+  ai-os-workspace:
+
+networks:
+  ai-os-net:

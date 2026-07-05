@@ -1,0 +1,26 @@
+{
+  "_comment": "Example autofill payload for the `instagram-5slide-v1` variant. Keys MUST match the Bulk Create column names exactly (see sample-bulk-create.csv). Replace brand_template_id with the real value from templates.registry.jsonc.",
+  "brand_template_id": "BRAND_TEMPLATE_ID_PLACEHOLDER_5SLIDE",
+  "title": "AI OS — Launch Carousel",
+  "data": {
+    "slide_1_headline": { "type": "text", "text": "Your brand has an Operating System now" },
+    "slide_1_body":     { "type": "text", "text": "Agents, skills, and automations that ship content while you sleep." },
+    "slide_1_cta":      { "type": "text", "text": "Swipe →" },
+
+    "slide_2_headline": { "type": "text", "text": "Agents that do the work" },
+    "slide_2_body":     { "type": "text", "text": "Each agent owns a lane — content, research, ops — and hands off cleanly." },
+    "slide_2_cta":      { "type": "text", "text": "→" },
+
+    "slide_3_headline": { "type": "text", "text": "Skills, not prompts" },
+    "slide_3_body":     { "type": "text", "text": "Reusable capabilities like this Canva carousel generator, versioned and shared." },
+    "slide_3_cta":      { "type": "text", "text": "→" },
+
+    "slide_4_headline": { "type": "text", "text": "Workflows that compound" },
+    "slide_4_body":     { "type": "text", "text": "Brief in, finished asset out. Every run makes the next one faster." },
+    "slide_4_cta":      { "type": "text", "text": "→" },
+
+    "slide_5_headline": { "type": "text", "text": "Subscribe to the AI OS" },
+    "slide_5_body":     { "type": "text", "text": "One subscription. Every workflow. Built on OpenCode." },
+    "slide_5_cta":      { "type": "text", "text": "Start →" }
+  }
+}

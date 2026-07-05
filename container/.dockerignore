@@ -1,0 +1,24 @@
+# VCS & env
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+
+# Local workspace — must never be baked; it's a per-user runtime mount.
+workspace/
+/workspace/
+
+# Node caches / local installs (the image installs its own globals)
+node_modules/
+.npm/
+.cache/
+
+# Build artifacts
+dist/
+build/
+*.log
+
+# OS noise
+.DS_Store
+Thumbs.db
