@@ -1,0 +1,443 @@
+// Brief schema for canva-carousel.
+//
+// WHAT THIS IS
+// ------------
+// A "brief" is the user-supplied input describing the deck they want. It is a
+// free-form-ish description with structure: brand identity (colors,
+// typography, icons, assets, components, logo, voice), per-slide intent and
+// content, and directives for where reusable visual assets come from
+// (user URL or AI-generated via Grok).
+//
+// A brief is INTENT, NOT A CONTRACT. Canva's `generate-design` is prompt-driven
+// and may deviate from the brief (missing CTAs, extra phantom text, invented
+// body copy, wrong aspect ratio). That is expected. The durable contract for
+// future edits is the captured `template.json`, produced AFTER generation,
+// which reflects what Canva actually created. See `template.schema.jsonc`.
+//
+// The `archetype_suggestion` field per slide references names from
+// `layouts.registry.jsonc`. Those names are PROMPT VOCABULARY ONLY — they give
+// the AI consistent words to use when prompting `generate-design`. They are
+// not validated against, and Canva is free to deviate.
+//
+//
+// ─────────────────────────────────────────────────────────────────────────────
+// THE BRAND LIBRARY — five asset channels
+// ─────────────────────────────────────────────────────────────────────────────
+// brand.{colors, typography, icons, assets, components} form a single named
+// library. Slides reference library items BY NAME rather than redeclaring them
+// at each call site. This keeps deck identity consistent and makes the
+// generate-design prompt cleaner.
+//
+//   colors      A role-based palette (background, accent, text-primary, etc.).
+//               Pure description — there is no MCP upload; the palette is
+//               rendered into the prompt as explicit hex + usage guidance.
+//
+//   typography  A pairing + per-role specs (family, weight, case, tracking,
+//               line-height) and a fallback. Pure description — there is NO
+//               font-file upload tool in the Canva MCP. Families referenced
+//               must exist in Canva's catalog (Inter, Montserrat, etc.) OR be
+//               manually uploaded by the user to their Canva Brand Kit first.
+//               Unknown families silently fall back to Canva defaults.
+//
+//   icons       Named set, each entry {url} (user-supplied) or
+//               {generate:true, brief} (Grok). Each is uploaded to Canva via
+//               upload-asset-from-url → asset_id at Phase 2.
+//
+//   assets      Named decorative library: textures, patterns, illustrations,
+//               photos, gradients, shapes. Same upload path as icons.
+//               Differentiated from `icons` only for clarity of intent —
+//               both resolve to Canva image assets.
+//
+//   components  Named recipes (e.g. "cta_pill", "stat_block", "feature_card")
+//               described as a slot list. ⚠️ NOT REAL CANVA COMPONENTS.
+//               Canva MCP has no component upload / no reusable-element
+//               concept. A component entry is a STRUCTURED DESCRIPTION that
+//               generate-design is asked to recreate on each slide that uses
+//               it. After capture, its elements appear in template.json as
+//               ordinary element_ids with an advisory source_ref hint
+//               ({library:"components", name:"cta_pill", slot:"label"})
+//               — not as a reusable unit.
+//
+//
+// ASSET DIRECTIVE FORMS (used in icons, assets, brand.logo, slides[].image)
+// ----------------------------------------------------------------------
+// Three forms are accepted anywhere an image/logo/icon/asset is requested:
+//
+//   1. User-supplied URL:
+//        { "url": "https://..." }
+//      The agent uploads it to Canva via `upload-asset-from-url` and uses the
+//      returned asset_id.
+//
+//   2. AI-generated via Grok:
+//        { "generate": true, "brief": "<creative direction>" }
+//      The agent calls `grok.generate_image` with the brief, gets a public
+//      image URL back, then uploads that URL to Canva the same way.
+//
+//   3. None / let Canva pick stock:
+//        null
+//      Omit the field, or set null. Canva's `generate-design` will choose
+//      fitting stock imagery on its own (no asset_id is pinned).
+{
+  "version": 2,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "canva-carousel brief",
+  "type": "object",
+  "required": ["deck_id", "title", "format", "slides"],
+  "additionalProperties": false,
+
+  "properties": {
+
+    "deck_id": {
+      "type": "string",
+      "description": "Stable identifier for this deck. Becomes the folder name under /workspace/carousels/<deck_id>/. Lowercase, hyphen-separated.",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+
+    "title": {
+      "type": "string",
+      "description": "Human-readable deck title. Used as the Canva design title."
+    },
+
+    "format": {
+      "type": "object",
+      "required": ["aspect_ratio"],
+      "additionalProperties": false,
+      "properties": {
+        "aspect_ratio": {
+          "enum": ["4:5", "1:1", "16:9", "9:16"],
+          "description": "Target aspect ratio. Note: Canva generate-design may ignore this; if it does, surface to user and accept or regenerate."
+        },
+        "size": {
+          "type": "object",
+          "description": "Explicit pixel dimensions. Optional; defaults derived from aspect_ratio (4:5 → 1080×1350, 1:1 → 1080×1080, 16:9 → 1920×1080, 9:16 → 1080×1920).",
+          "properties": { "width": {"type":"integer"}, "height": {"type":"integer"} }
+        },
+        "platform": {
+          "type": "string",
+          "description": "Target platform (instagram, linkedin, etc.) — used in the generate-design prompt for context.",
+          "examples": ["instagram", "linkedin", "twitter", "youtube"]
+        }
+      }
+    },
+
+    "brand": {
+      "type": "object",
+      "description": "Brand identity to preserve across the deck. All channels optional but recommended.",
+      "additionalProperties": false,
+
+      "properties": {
+
+        "name":  { "type": "string" },
+
+        "voice": { "type": "string", "description": "Tone/style guidance, e.g. 'Direct, technical, no hype.'" },
+
+        // ── Channel 1: colors ──────────────────────────────────────────────
+        // Role-based palette. Keys are role names (free-form); values are hex
+        // strings plus optional usage notes. Pure description → rendered into
+        // the generate-design prompt as explicit guidance.
+        "colors": {
+          "type": "object",
+          "description": "Role-keyed palette. Each key is a role (background, accent, text-primary, etc.), each value is a hex string. Use `color_usage` to add per-role guidance.",
+          "additionalProperties": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+          "examples": [{
+            "background":    "#0B0B0F",
+            "surface":       "#1A1A24",
+            "text_primary":  "#FFFFFF",
+            "text_secondary":"#B8B8C8",
+            "accent":        "#7C5CFF",
+            "accent_alt":    "#00D4C8"
+          }]
+        },
+
+        "color_usage": {
+          "type": "object",
+          "description": "Optional per-role usage notes. Rendered into the prompt as 'use <role> for <note>'.",
+          "additionalProperties": { "type": "string" },
+          "examples": [{
+            "accent":        "CTAs, key highlights, and chart accents only — never body text.",
+            "background":    "Full-bleed dark base on every slide.",
+            "text_secondary":"captions, image credits, slide numbers."
+          }]
+        },
+
+        // ── Channel 2: typography ──────────────────────────────────────────
+        // Pure description. There is NO font-file upload tool in the Canva MCP.
+        // Families referenced must exist in Canva's catalog OR be manually
+        // uploaded to the user's Canva Brand Kit. Unknown families silently
+        // fall back to Canva defaults — surface this in the report if it happens.
+        "typography": {
+          "type": "object",
+          "description": "Typography system as description. Baked verbatim into the generate-design prompt.",
+          "additionalProperties": false,
+          "properties": {
+
+            "pairing": {
+              "type": "string",
+              "description": "One-line description of the pairing intent.",
+              "examples": ["Geometric sans headlines + clean grotesque body. Confident, modern, technical."]
+            },
+
+            "roles": {
+              "type": "object",
+              "description": "Per-role specs. Known roles: headline, body, cta, caption, stat, label, handle. Custom roles allowed.",
+              "additionalProperties": {
+                "type": "object",
+                "required": ["family"],
+                "additionalProperties": false,
+                "properties": {
+                  "family":       { "type": "string", "description": "Font family NAME as Canva knows it (Inter, Montserrat, Roboto, etc.). If user-uploaded to Brand Kit, use that name exactly." },
+                  "weight":       { "enum": ["normal", "medium", "semibold", "bold", "black"] },
+                  "case":         { "enum": ["uppercase", "lowercase", "title", "sentence", "none"] },
+                  "letter_spacing": { "type": "string", "examples": ["tight", "-0.02em", "normal", "0.04em"] },
+                  "line_height":  { "type": ["string", "number"], "examples": ["1.05", "1.4"] },
+                  "size_hint":    { "type": "string", "description": "Relative guidance, e.g. 'largest on slide', 'small', '64-96px'." }
+                }
+              }
+            },
+
+            "fallback": {
+              "type": "string",
+              "description": "Fallback family if a named family is unavailable in Canva.",
+              "examples": ["Inter (or Sans Serif if unavailable)"]
+            },
+
+            "notes": {
+              "type": "string",
+              "description": "Free-form typography guidance for the prompt."
+            }
+          }
+        },
+
+        // ── Channel 3: icons ───────────────────────────────────────────────
+        // Named set. Each entry is an image directive (url / generate / null).
+        // Uploaded at Phase 2; referenced by name at the slide level via
+        // slides[].icons[] (a list of names from this library).
+        "icons": {
+          "type": "object",
+          "description": "Named icon set. Each value is an asset directive (url / generate / null). Slides reference icons by name.",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "object", "required": ["url"], "properties": { "url": {"type":"string","format":"uri"}, "alt_text": {"type":"string"} } },
+              { "type": "object", "required": ["generate","brief"],
+                "properties": { "generate": {"const":true}, "brief": {"type":"string"}, "alt_text": {"type":"string"} } }
+            ]
+          },
+          "examples": [{
+            "arrow_right":  { "generate": true, "brief": "thin-stroke right-arrow glyph on transparent, monoline, accent #7C5CFF" },
+            "check":        { "url": "https://cdn.example.com/brand/check.svg" },
+            "bolt":         { "generate": true, "brief": "monoline lightning bolt glyph, accent #00D4C8 on transparent" }
+          }]
+        },
+
+        // ── Channel 4: assets (decorative library) ─────────────────────────
+        // Textures, patterns, illustrations, photos, gradients, shapes.
+        // Same upload path as icons. Differentiated from icons only for
+        // intent clarity — both resolve to Canva image assets.
+        "assets": {
+          "type": "object",
+          "description": "Named decorative library. Each value is an asset directive. Slides reference assets by name via slides[].assets[].",
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "object", "required": ["url"], "properties": { "url": {"type":"string","format":"uri"}, "alt_text": {"type":"string"} } },
+              { "type": "object", "required": ["generate","brief"],
+                "properties": { "generate": {"const":true}, "brief": {"type":"string"}, "alt_text": {"type":"string"} } }
+            ]
+          },
+          "examples": [{
+            "circuit_texture": { "generate": true, "brief": "subtle circuitry texture on dark #0B0B0F, low-contrast, tileable, no text" },
+            "grain_overlay":   { "url": "https://cdn.example.com/brand/grain.png" },
+            "accent_glow":     { "generate": true, "brief": "soft radial accent glow, #7C5CFF center fading to transparent" }
+          }]
+        },
+
+        // ── Channel 5: components (recipes, NOT real components) ───────────
+        // ⚠️ Canva MCP has no component concept. These are STRUCTURED
+        // DESCRIPTIONS that generate-design is asked to recreate on each slide
+        // that uses the component. After capture, their elements appear in
+        // template.json as ordinary element_ids with an advisory source_ref
+        // hint linking them back to the named component + slot. They are NOT
+        // reusable across decks as a unit.
+        "components": {
+          "type": "object",
+          "description": "Named component recipes. Each describes its visual treatment and a list of named slots (role + content hint). Slides reference components by name via slides[].components[{name, slots}].",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["description", "slots"],
+            "additionalProperties": false,
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "Visual treatment of this component as a whole. Baked into the prompt when the component is used."
+              },
+              "slots": {
+                "type": "array",
+                "description": "Named slots this component contains. Each slot becomes a potential element on the slide.",
+                "items": {
+                  "type": "object",
+                  "required": ["name", "role"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "name":        { "type": "string", "description": "Slot name, e.g. 'label', 'value', 'icon'." },
+                    "role":        { "enum": ["headline", "body", "cta", "caption", "stat", "label", "image", "icon"] },
+                    "description": { "type": "string", "description": "What this slot should contain." }
+                  }
+                }
+              }
+            }
+          },
+          "examples": [{
+            "cta_pill": {
+              "description": "Pill-shaped button, accent fill, white text, monoline arrow icon right-aligned.",
+              "slots": [
+                { "name": "label", "role": "cta",     "description": "Short action verb + arrow, e.g. 'Start →'." },
+                { "name": "icon",  "role": "icon",    "description": "Small arrow glyph matching brand.icons.arrow_right." }
+              ]
+            },
+            "stat_block": {
+              "description": "Giant stat number in accent color, label below in secondary text.",
+              "slots": [
+                { "name": "value", "role": "stat",  "description": "Large numeric or token value, e.g. '10×'." },
+                { "name": "label", "role": "label", "description": "One-line explainer beneath the stat." }
+              ]
+            }
+          }]
+        },
+
+        // ── Logo + handle (unchanged from v1) ──────────────────────────────
+        "logo": {
+          "description": "Logo asset directive. Same shape as any image field (see header). null to skip.",
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object", "required": ["url"], "properties": { "url": {"type":"string","format":"uri"} } },
+            { "type": "object", "required": ["generate","brief"],
+              "properties": { "generate": {"const":true}, "brief": {"type":"string"} } }
+          ]
+        },
+
+        "handle": { "type": "string", "description": "Social handle / URL for closing slides." }
+      }
+    },
+
+    "slides": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered list of slide intents. One entry per slide.",
+      "items": {
+        "type": "object",
+        "required": ["n", "intent"],
+        "additionalProperties": false,
+        "properties": {
+
+          "n": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-indexed slide position."
+          },
+
+          "intent": {
+            "type": "string",
+            "description": "One-line statement of what this slide should accomplish. Used verbatim in the generate-design prompt."
+          },
+
+          "archetype_suggestion": {
+            "type": "string",
+            "description": "Optional. Name from layouts.registry.jsonc (hero, split, editorial, cards, center, minimal). PROMPT VOCABULARY ONLY — never validated. Helps the AI pick composition words; Canva may deviate.",
+            "examples": ["hero", "split", "editorial", "cards", "center", "minimal"]
+          },
+
+          "content": {
+            "type": "object",
+            "description": "Verbatim copy for this slide. The agent should pass these to generate-design as-is; Canva may rewrite them (capture as-is, offer replace_text in edits).",
+            "additionalProperties": false,
+            "properties": {
+              "headline": { "type": "string" },
+              "body":     { "type": "string" },
+              "cta":      { "type": "string" }
+            }
+          },
+
+          "image": {
+            "description": "Primary image directive for this slide. See header for the three accepted forms (url / generate / null). For multi-image slides, use slides[].assets[] to reference brand.assets entries instead.",
+            "oneOf": [
+              { "type": "null" },
+              { "type": "object", "required": ["url"], "properties": { "url": {"type":"string","format":"uri"}, "alt_text": {"type":"string"} } },
+              { "type": "object", "required": ["generate","brief"],
+                "properties": { "generate": {"const":true}, "brief": {"type":"string"}, "alt_text": {"type":"string"} } }
+            ]
+          },
+
+          // Slide-level references into the brand library. Each is a list of
+          // NAMES that must exist in the corresponding brand.* block. The
+          // agent resolves these at Phase 2 (assets/icons get uploaded once)
+          // and Phase 3 (each generate-design prompt names the resolved
+          // asset_ids + component recipes to use on this slide).
+          "icons": {
+            "type": "array",
+            "description": "Names of brand.icons entries to place on this slide. Each must exist in brand.icons.",
+            "items": { "type": "string" },
+            "examples": [["arrow_right"], ["check", "bolt"]]
+          },
+
+          "assets": {
+            "type": "array",
+            "description": "Names of brand.assets entries to place on this slide (textures, patterns, etc.). Each must exist in brand.assets.",
+            "items": { "type": "string" },
+            "examples": [["circuit_texture", "accent_glow"]]
+          },
+
+          "components": {
+            "type": "array",
+            "description": "Component instances to render on this slide. Each entry names a brand.components recipe and provides per-slot content (overriding the recipe's defaults).",
+            "items": {
+              "type": "object",
+              "required": ["name"],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "description": "Must match a key in brand.components."
+                },
+                "slots": {
+                  "type": "object",
+                  "description": "Per-slot content overrides. Keys are slot names from the recipe; values are strings (text) or asset directives (image/icon).",
+                  "additionalProperties": {
+                    "oneOf": [
+                      { "type": "string" },
+                      { "type": "null" },
+                      { "type": "object", "required": ["url"], "properties": { "url": {"type":"string","format":"uri"}, "alt_text": {"type":"string"} } },
+                      { "type": "object", "required": ["generate","brief"],
+                        "properties": { "generate": {"const":true}, "brief": {"type":"string"}, "alt_text": {"type":"string"} } },
+                      { "type": "object", "required": ["ref"],
+                        "properties": { "ref": {"type":"string","description":"Name of a brand.icons or brand.assets entry to use as this slot's content."} } }
+                    ]
+                  }
+                }
+              }
+            },
+            "examples": [
+              { "name": "cta_pill", "slots": { "label": "Start →", "icon": { "ref": "arrow_right" } } },
+              { "name": "stat_block", "slots": { "value": "10×", "label": "Faster second run, every run." } }
+            ]
+          }
+        }
+      }
+    },
+
+    "exports": {
+      "type": "array",
+      "description": "Export targets. Each entry produces one export job at Phase 5.",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "additionalProperties": false,
+        "properties": {
+          "type":    { "enum": ["png", "pdf"] },
+          "per_page": { "type": "boolean", "description": "true → one file per slide (PNG only). false → single multi-page file (PDF default)." },
+          "dir":     { "type": "string", "description": "Output directory. Defaults to /workspace/carousels/<deck_id>/exports/." }
+        }
+      }
+    }
+  }
+}

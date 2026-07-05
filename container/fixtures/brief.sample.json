@@ -1,0 +1,155 @@
+{
+  "deck_id": "ai-os-launch-v1",
+  "title": "AI OS — Launch Carousel",
+
+  "format": {
+    "aspect_ratio": "4:5",
+    "size": { "width": 1080, "height": 1350 },
+    "platform": "instagram"
+  },
+
+  "brand": {
+    "name": "AI OS",
+    "voice": "Direct, technical, no hype.",
+
+    "colors": {
+      "background":     "#0B0B0F",
+      "surface":        "#1A1A24",
+      "text_primary":   "#FFFFFF",
+      "text_secondary": "#B8B8C8",
+      "accent":         "#7C5CFF",
+      "accent_alt":     "#00D4C8"
+    },
+    "color_usage": {
+      "background":     "Full-bleed dark base on every slide.",
+      "accent":         "CTAs, key highlights, chart accents only — never body text.",
+      "accent_alt":     "Use sparingly to mark secondary highlights or icons.",
+      "text_secondary": "Captions, image credits, slide numbers."
+    },
+
+    "typography": {
+      "pairing": "Geometric sans headlines + clean grotesque body. Confident, modern, technical.",
+      "roles": {
+        "headline": { "family": "Inter", "weight": "bold",   "case": "sentence", "letter_spacing": "-0.02em", "line_height": 1.05, "size_hint": "largest on slide, 64–96px" },
+        "body":     { "family": "Inter", "weight": "normal", "case": "sentence", "letter_spacing": "normal",   "line_height": 1.4,  "size_hint": "comfortable reading, 22–28px" },
+        "cta":      { "family": "Inter", "weight": "semibold","case": "sentence","letter_spacing": "0.02em",  "size_hint": "punchy, 24–32px" },
+        "stat":     { "family": "Inter", "weight": "black",  "case": "uppercase", "letter_spacing": "-0.04em", "size_hint": "huge, 160–220px" },
+        "label":    { "family": "Inter", "weight": "medium", "case": "uppercase", "letter_spacing": "0.08em",  "size_hint": "small caps, 14–18px" },
+        "caption":  { "family": "Inter", "weight": "normal", "case": "sentence", "letter_spacing": "normal",   "size_hint": "smallest on slide, 12–14px" }
+      },
+      "fallback": "Inter (or Sans Serif if unavailable)",
+      "notes": "All headlines sentence-case; only STAT labels go uppercase. Tight tracking on large display sizes; relaxed on body."
+    },
+
+    "icons": {
+      "arrow_right": { "generate": true, "brief": "thin-stroke right-arrow glyph, monoline, accent #7C5CFF, transparent background, ~64×64 px", "alt_text": "Right arrow" },
+      "check":       { "generate": true, "brief": "monoline checkmark glyph, accent #00D4C8, transparent background, ~64×64 px", "alt_text": "Checkmark" },
+      "bolt":        { "generate": true, "brief": "monoline lightning bolt glyph, accent #7C5CFF, transparent background, ~64×64 px", "alt_text": "Lightning bolt" }
+    },
+
+    "assets": {
+      "circuit_texture": { "generate": true, "brief": "subtle circuitry texture on dark #0B0B0F, low-contrast, tileable, no text, abstract", "alt_text": "Circuit texture" },
+      "accent_glow":     { "generate": true, "brief": "soft radial accent glow, #7C5CFF center fading to transparent, square aspect", "alt_text": "Accent glow" }
+    },
+
+    "components": {
+      "cta_pill": {
+        "description": "Pill-shaped button. Accent fill (#7C5CFF), white text, monoline arrow glyph right-aligned. Used for slide CTAs.",
+        "slots": [
+          { "name": "label", "role": "cta",  "description": "Short action verb + arrow, e.g. 'Start →'." },
+          { "name": "icon",  "role": "icon", "description": "Small arrow glyph matching brand.icons.arrow_right." }
+        ]
+      },
+      "stat_block": {
+        "description": "Giant stat number in accent_alt (#00D4C8), short label beneath in label typography (uppercase, tracked).",
+        "slots": [
+          { "name": "value", "role": "stat",  "description": "Large numeric or token value, e.g. '10×'." },
+          { "name": "label", "role": "label", "description": "One-line explainer beneath the stat." }
+        ]
+      }
+    },
+
+    "logo":   null,
+    "handle": "@aios"
+  },
+
+  "slides": [
+    {
+      "n": 1,
+      "intent": "Cover slide. Establish the product as a brand-new category.",
+      "archetype_suggestion": "hero",
+      "content": {
+        "headline": "Your brand has an Operating System now",
+        "cta":      "Swipe →"
+      },
+      "image": {
+        "generate": true,
+        "brief": "Dark gradient backdrop #0B0B0F with subtle circuitry texture; empty space in upper third for headline overlay; premium minimal mood, no people, no text."
+      },
+      "assets": ["accent_glow"],
+      "components": [
+        { "name": "cta_pill", "slots": { "label": "Swipe →", "icon": { "ref": "arrow_right" } } }
+      ]
+    },
+
+    {
+      "n": 2,
+      "intent": "Introduce the agent layer of the product.",
+      "archetype_suggestion": "split",
+      "content": {
+        "headline": "Agents that do the work",
+        "body":     "Each agent owns a lane — content, research, ops — and hands off cleanly.",
+        "cta":      "→"
+      },
+      "image": null,
+      "icons": ["bolt"],
+      "components": [
+        { "name": "cta_pill", "slots": { "label": "→", "icon": { "ref": "arrow_right" } } }
+      ]
+    },
+
+    {
+      "n": 3,
+      "intent": "Explain the skills concept with a magazine-feel slide.",
+      "archetype_suggestion": "editorial",
+      "content": {
+        "headline": "Skills, not prompts",
+        "body":     "Reusable capabilities like this Canva carousel generator, versioned and shared."
+      },
+      "image": null
+    },
+
+    {
+      "n": 4,
+      "intent": "Show compounding value over time with a punchy stat slide.",
+      "archetype_suggestion": "split",
+      "components": [
+        { "name": "stat_block", "slots": { "value": "10×", "label": "Faster second run, every run." } }
+      ],
+      "image": null
+    },
+
+    {
+      "n": 5,
+      "intent": "Closing CTA slide. Mirror cover slide's visual treatment.",
+      "archetype_suggestion": "hero",
+      "content": {
+        "headline": "Subscribe to the AI OS",
+        "cta":      "Start →"
+      },
+      "image": {
+        "generate": true,
+        "brief": "Dark gradient backdrop matching slide 1, full-bleed; same premium minimal mood; room for headline overlay in lower third."
+      },
+      "assets": ["accent_glow"],
+      "components": [
+        { "name": "cta_pill", "slots": { "label": "Start →", "icon": { "ref": "arrow_right" } } }
+      ]
+    }
+  ],
+
+  "exports": [
+    { "type": "png", "per_page": true },
+    { "type": "pdf", "per_page": false }
+  ]
+}

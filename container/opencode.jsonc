@@ -84,8 +84,7 @@
       ],
       "enabled": true,
       "environment": {
-        "LAYERRE_API_KEY": "{env:LAYERRE_API_KEY}",
-        "UV_PROJECT_ENVIRONMENT": "/app/mcps/layerre-mcp/.venv"
+        "LAYERRE_API_KEY": "{env:LAYERRE_API_KEY}"
       }
     }
   }

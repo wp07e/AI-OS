@@ -101,18 +101,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && uv sync --frozen --no-dev \
  && find ${GROK_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} + \
  && chmod -R a+rX /opt/uv/python
-# Tell uv the project's environment is the baked venv and must not be
-# re-synced at runtime — keeps it usable by the non-root appuser without
-# write access.
-ENV UV_PROJECT_ENVIRONMENT=${APP_DIR}/mcps/grok-mcp/.venv \
-    UV_FROZEN=1
+# Tell uv not to re-sync the baked venv at runtime — keeps it usable by the
+# non-root appuser without write access. NOTE: we deliberately do NOT set
+# UV_PROJECT_ENVIRONMENT globally: it would pin every `uv run` to one
+# project's venv. Without it, uv uses each project's own .venv (the default),
+# which is what we want for every bundled MCP.
+ENV UV_FROZEN=1
 
 # ─── Layerre MCP ───────────────────────────────────────────────────────────
 # Bundled Python MCP server for the Layerre API (Canva → template → variant
 # rendering). Same bake pattern as Grok: venv synced in the runtime stage so
 # the recorded interpreter matches the image uv will use at first launch.
-# At runtime opencode.jsonc overrides UV_PROJECT_ENVIRONMENT per-MCP so each
-# server reuses its own baked venv.
+# Because UV_PROJECT_ENVIRONMENT is not set globally, uv creates this venv in
+# /app/mcps/layerre-mcp/.venv (its default) rather than clobbering grok's.
 ENV LAYERRE_MCP_DIR=${APP_DIR}/mcps/layerre-mcp
 COPY mcps/layerre-mcp/pyproject.toml mcps/layerre-mcp/uv.lock ${LAYERRE_MCP_DIR}/
 COPY mcps/layerre-mcp/main.py ${LAYERRE_MCP_DIR}/

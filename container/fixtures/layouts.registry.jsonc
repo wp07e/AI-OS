@@ -1,0 +1,147 @@
+// Layout archetype registry for canva-carousel.
+//
+// ⚠️  THIS FILE IS PROMPT VOCABULARY, NOT A VALIDATION CONTRACT.
+// --------------------------------------------------------------
+// The archetype names below exist so the AI has consistent words to use when
+// prompting Canva's `generate-design`. They describe composition intent.
+//
+// They are NOT enforced. Canva MCP is a content-editing API, not a layout-
+// authoring API — `generate-design` will routinely deviate from the manifests
+// here (missing CTAs, extra phantom text, invented body copy, wrong counts,
+// wrong aspect ratio). That is expected and accepted. Nothing in the agent
+// workflow validates a slide against this registry.
+//
+// The durable contract for any deck is the captured `template.json` (see
+// `template.schema.jsonc`), produced AFTER generation by walking what Canva
+// actually created. This file is only consulted when building the natural-
+// language prompt for `generate-design`.
+//
+// Why keep the manifests then?
+//   - They document intent. When writing a brief, knowing that a `split`
+//     slide "should" contain headline + body + image + cta helps the author
+//     decide whether `split` is the right archetype suggestion for their slide.
+//   - They seed the prompt. The agent references them when describing what
+//     each slide should feel like. Canva is free to ignore.
+//
+// Element role vocabulary (used inside manifests as documentation of intent):
+//   headline  — dominant short line, always the largest type on the slide.
+//   body      — supporting paragraph, 1–2 lines, never competes with headline.
+//   cta       — short action label ("Swipe →", "Start"). Optional on most slides.
+//   image     — single hero image (background, half-bleed, or accent depending
+//               on `placement`). Use `{ "asset_id": "..." }` to pin a specific
+//               uploaded asset; omit / null to let Canva choose imagery.
+//   caption   — optional small text under an image (e.g. photo credit, source).
+//   stat      — a giant number or short token ("10×", "v2").
+//   label     — one-line explainer that pairs with a stat.
+//   logo      — brand mark, usually small, fixed corner.
+//   handle    — social handle / URL, usually on closing slides.
+//
+// `count` semantics:
+//   integer ≥ 1  → exactly that many elements of this role.
+//   "0+"         → zero or more (optional, free).
+//   "1+"         → one or more (required, free count).
+// To express "0 or 1", we use count 1 with required:false (i.e. at most one,
+// may be absent). "Required" alone governs presence, not multiplicity.
+{
+  "version": 2,
+  "format_constraints": {
+    "supported_aspect_ratios": ["4:5", "1:1", "16:9"],
+    "default_size": { "width": 1080, "height": 1350 }
+  },
+
+  // Global design rules — apply to every slide regardless of archetype.
+  // The agent should bake these into the prompt it sends to Canva.
+  "global_rules": {
+    "hierarchy": ["headline", "body", "cta"],
+    "headline_is_dominant": true,
+    "body_never_competes_with_headline": true,
+    "images_support_message": true,
+    "use_whitespace_generously": true,
+    "preserve_brand_identity_across_deck": true,
+    "avoid_repeat_run": "Same archetype must not appear on more than 2 consecutive slides.",
+    "vary_alignment_and_scale_between_slides": true
+  },
+
+  "archetypes": {
+
+    "hero": {
+      "description": "Full-bleed image with headline (and optional CTA) overlaid. The classic cover or punch slide.",
+      "best_for": ["cover", "section-divider", "punchline"],
+      "elements": [
+        { "role": "image",    "count": 1,  "required": true,  "placement": "background",
+          "note": "Full-bleed. If asset_id omitted, Canva selects a fitting stock image." },
+        { "role": "headline", "count": 1,  "required": true,  "placement": "overlay" },
+        { "role": "cta",      "count": 1,  "required": false, "placement": "overlay" }
+      ]
+    },
+
+    "split": {
+      "description": "Image on one side, text stack on the other. The workhorse carousel body slide.",
+      "best_for": ["body", "feature", "before/after"],
+      "elements": [
+        { "role": "image",    "count": 1,  "required": true,  "placement": "half-bleed",
+          "note": "Agent may pick left/right side per slide to vary pacing." },
+        { "role": "headline", "count": 1,  "required": true,  "placement": "text-half" },
+        { "role": "body",     "count": 1,  "required": true,  "placement": "text-half" },
+        { "role": "cta",      "count": 1,  "required": false, "placement": "text-half" }
+      ]
+    },
+
+    "editorial": {
+      "description": "Large headline dominates the page, small supporting image and body beneath. Magazine feel.",
+      "best_for": ["quote", "insight", "section opener"],
+      "elements": [
+        { "role": "headline", "count": 1,  "required": true,  "placement": "dominant",
+          "note": "Largest type on the slide; sets the visual weight." },
+        { "role": "image",    "count": 1,  "required": false, "placement": "accent",
+          "note": "Small supporting image; can be omitted for a pure-type slide." },
+        { "role": "body",     "count": 1,  "required": false, "placement": "below-headline" }
+      ]
+    },
+
+    "cards": {
+      "description": "Two or three floating layered cards — a headline card plus supporting cells. Reads as a list.",
+      "best_for": ["list", "comparison", "three-features"],
+      "elements": [
+        { "role": "headline", "count": 1,  "required": true,  "placement": "top-card" },
+        { "role": "body",     "count": "1+", "required": true, "placement": "supporting-cards",
+          "note": "Each body entry becomes its own card. Provide 1–3." },
+        { "role": "image",    "count": 1,  "required": false, "placement": "background-accent",
+          "note": "Optional soft background; cards float above it." }
+      ]
+    },
+
+    "center": {
+      "description": "Headline centered with image(s) framing it. Calm, declarative.",
+      "best_for": ["manifesto", "principle", "announcement"],
+      "elements": [
+        { "role": "headline", "count": 1,  "required": true,  "placement": "center" },
+        { "role": "image",    "count": 1,  "required": false, "placement": "frame",
+          "note": "Sits behind or around the headline; can be omitted." },
+        { "role": "body",     "count": 1,  "required": false, "placement": "below-headline" }
+      ]
+    },
+
+    "minimal": {
+      "description": "Typography-led slide with at most one small supporting image. Lets a single line breathe.",
+      "best_for": ["transition", "axiom", "single-line punch"],
+      "elements": [
+        { "role": "headline", "count": 1,  "required": true,  "placement": "page" },
+        { "role": "image",    "count": 1,  "required": false, "placement": "small-accent",
+          "note": "If used, keep it small — headline must remain dominant." },
+        { "role": "body",     "count": 1,  "required": false, "placement": "below-headline" }
+      ]
+    }
+  },
+
+  // Deck-level rules — ASPIRATIONAL guidance for prompt construction only.
+  // The agent should bake these into the generate-design prompt as soft
+  // preferences. They are NOT enforced after generation; the captured
+  // template.json is the ground truth.
+  "deck_rules": {
+    "first_slide_should_be": ["hero", "center", "editorial"],
+    "last_slide_should_be":  ["hero", "split"],
+    "max_consecutive_same_archetype": 2,
+    "cta_encouraged_on": ["hero", "split"]
+  }
+}

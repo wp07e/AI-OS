@@ -1,0 +1,303 @@
+// Template schema for canva-carousel.
+//
+// WHAT THIS IS
+// ------------
+// A "template" is the captured inventory of what Canva ACTUALLY produced for
+// a deck, walked out after `generate-design` runs. It is the durable contract
+// for every future edit. The brief is intent; this file is ground truth.
+//
+// Why this exists: Canva MCP is a content-editing API, not a layout-authoring
+// API. `generate-design` will deviate from any prescriptive spec (missing
+// CTAs, extra phantom text, invented body copy, wrong aspect ratio). Rather
+// than fight that, we let Canva author freely, then freeze the result. From
+// that point on, this JSON describes the slide and every edit resolves
+// against the element_ids captured here.
+//
+// HARD CONSTRAINT
+// ---------------
+// Canva MCP CANNOT add elements to an existing design. There is no
+// `insert_text` or `insert_element` operation — only `insert_fill` (image
+// into an existing page, positionable) and even that does not create a
+// managed text element. Therefore:
+//
+//   - Edits may: replace text, swap image fills, move/resize existing
+//     elements, delete elements (deleting leaves a gap — no auto-reflow).
+//   - Edits may NOT: add a new headline, add a missing CTA, add a new image
+//     slot, add any element that does not already exist in this template.
+//
+// Requests to add elements must be rejected with:
+//   "Cannot add elements to an existing Canva design via MCP.
+//    Options: (a) regenerate that slide from a new brief, (b) finish in
+//    Canva UI manually."
+//
+// ELEMENT ID STABILITY
+// --------------------
+// element_ids are mostly stable but can become invalid across long edit
+// sessions or after destructive operations. ALWAYS re-read template.json
+// before edits. If a stored element_id 404s during an edit attempt,
+// re-capture the template (re-run Phase 4 of the skill) before retrying.
+//
+// ADVISORY inferred_role
+// ----------------------
+// Each element MAY carry an `inferred_role` field (headline / body / cta /
+// image / caption / etc.), assigned by the agent at capture time using simple
+// heuristics (largest text on page → headline, etc.).
+//
+//   inferred_role is a HINT, NOT A CONTRACT.
+//
+// It exists so that when a user says "change the headline on slide 3," the
+// agent has a way to disambiguate which element_id that means. The agent
+// should still confirm with the user if ambiguous. Edit operations always
+// target element_id; inferred_role is only consulted to pick one.
+{
+  "version": 1,
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "canva-carousel captured template",
+  "type": "object",
+  "required": ["deck_id", "design_id", "captured_at", "pages"],
+
+  // Top-level note: the schema does not enforce `additionalProperties: false`
+  // at every level because Canva MCP responses may include fields not listed
+  // here (rotations, opacity, link URLs, etc.). The agent should preserve
+  // unknown fields on round-trip rather than strip them.
+  "additionalProperties": true,
+
+  "properties": {
+
+    "deck_id": {
+      "type": "string",
+      "description": "Matches brief.deck_id. Folder name under /workspace/carousels/."
+    },
+
+    "design_id": {
+      "type": "string",
+      "description": "Canva design ID (starts with 'D'). Used for all subsequent edit/export calls."
+    },
+
+    "design_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Public Canva URL for the design, if available."
+    },
+
+    "captured_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of when this template was captured."
+    },
+
+    "source_brief_path": {
+      "type": "string",
+      "description": "Path to the brief.json this template was generated from (copied into the same deck folder)."
+    },
+
+    "constraint": {
+      "type": "object",
+      "description": "Explicit declaration of the hard constraint, surfaced for tooling.",
+      "properties": {
+        "cannot_add_elements": { "const": true },
+        "deletion_leaves_gap": { "const": true },
+        "note": {
+          "const": "Canva MCP is content-editing only. No insert_text/insert_element. See header."
+        }
+      }
+    },
+
+    "brand_resolved": {
+      "type": "object",
+      "description": "ADVISORY provenance map. After Phase 2 resolves every named library item into a Canva asset_id (or leaves it as 'description only' for colors/typography/components), the result is recorded here. Lets edits say 'swap the arrow_right icon' resolve without re-uploading. May be null/empty if no library items were used.",
+      "additionalProperties": false,
+      "properties": {
+
+        "icons": {
+          "type": "object",
+          "description": "Map of brand.icons name → { asset_id, source_url }. null asset_id means generation/upload failed; surface in report.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "asset_id":  { "type": ["string", "null"] },
+              "source_url":{ "type": ["string", "null"] },
+              "brief":     { "type": ["string", "null"] }
+            }
+          }
+        },
+
+        "assets": {
+          "type": "object",
+          "description": "Map of brand.assets name → { asset_id, source_url, brief }. Same shape as icons.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "asset_id":  { "type": ["string", "null"] },
+              "source_url":{ "type": ["string", "null"] },
+              "brief":     { "type": ["string", "null"] }
+            }
+          }
+        },
+
+        "logo": {
+          "type": ["object", "null"],
+          "description": "Resolved logo, if any.",
+          "properties": {
+            "asset_id":  { "type": ["string", "null"] },
+            "source_url":{ "type": ["string", "null"] },
+            "brief":     { "type": ["string", "null"] }
+          }
+        },
+
+        "color_usage_applied": {
+          "type": "boolean",
+          "description": "True if the role palette and color_usage notes were rendered into the generate-design prompt. Pure-description channel — no asset_ids."
+        },
+
+        "typography_applied": {
+          "type": "boolean",
+          "description": "True if the typography roles + fallback were rendered into the generate-design prompt. Pure-description channel — no asset_ids. NOTE: if any family wasn't recognized by Canva (silently fell back), surface that in the report."
+        }
+      }
+    },
+
+    "pages": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["page_id", "page_index", "elements"],
+        "additionalProperties": true,
+
+        "properties": {
+
+          "page_id": {
+            "type": "string",
+            "description": "Canva page ID. Used as the target for insert_fill and as a reference for page-scoped operations."
+          },
+
+          "page_index": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-indexed slide position. Matches brief.slides[].n ordering."
+          },
+
+          "width":  { "type": "integer" },
+          "height": { "type": "integer" },
+
+          "is_responsive": {
+            "type": "boolean",
+            "description": "If true, the page uses Canva's responsive layout engine (rare for generated designs). Most generated pages are fixed-coordinate."
+          },
+
+          "elements": {
+            "type": "array",
+            "description": "Every element Canva created on this page. Order is not significant.",
+            "items": {
+              "type": "object",
+              "required": ["element_id", "type"],
+              "additionalProperties": true,
+
+              "properties": {
+
+                "element_id": {
+                  "type": "string",
+                  "description": "Canva element ID. The primary key for replace_text / update_fill / position_element / resize_element / delete_element."
+                },
+
+                "type": {
+                  "enum": ["text", "image", "video"],
+                  "description": "Element type. Determines which fields below are populated and which edit operations apply."
+                },
+
+                "text": {
+                  "type": "string",
+                  "description": "Present when type=text. Full text content of the element. Use replace_text or find_and_replace_text to edit."
+                },
+
+                "asset_id": {
+                  "type": "string",
+                  "description": "Present when type=image or video. Canva asset ID. Use update_fill to swap (requires a different asset_id from an upload-asset-from-url call)."
+                },
+
+                "alt_text": {
+                  "type": "string",
+                  "description": "Optional accessibility text for image/video elements."
+                },
+
+                "position": {
+                  "type": "object",
+                  "description": "Top-left position in pixels, relative to the page. Use position_element to change.",
+                  "properties": {
+                    "top":  { "type": "number" },
+                    "left": { "type": "number" }
+                  }
+                },
+
+                "size": {
+                  "type": "object",
+                  "description": "Element dimensions in pixels. Use resize_element to change. For text elements, do NOT set height (auto-calculated).",
+                  "properties": {
+                    "width":  { "type": "number" },
+                    "height": { "type": "number" }
+                  }
+                },
+
+                "rotation": {
+                  "type": "number",
+                  "minimum": -180,
+                  "maximum": 180,
+                  "description": "Rotation in degrees. Range [-180, 180]."
+                },
+
+                "opacity": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1,
+                  "description": "Opacity. Range [0, 1]."
+                },
+
+                "inferred_role": {
+                  "type": ["string", "null"],
+                  "description": "ADVISORY HINT ONLY — not a contract. Heuristic guess at semantic role (headline/body/cta/image/caption/stat/label/logo/handle). Used to disambiguate edit requests ('change the headline on slide 3'). May be wrong or null; verify against element content before trusting."
+                },
+
+                "source_ref": {
+                  "type": ["object", "null"],
+                  "description": "ADVISORY HINT ONLY — not a contract. If the element was placed because a slide referenced a brand library item or component slot by name, that provenance is captured here. Lets edit requests say 'swap the icon on slide 2' resolve to the right element_id by way of {library:'icons', name:'arrow_right'}. May be null for elements Canva generated on its own.",
+                  "additionalProperties": false,
+                  "properties": {
+                    "library": {
+                      "enum": ["icons", "assets", "components", "logo"],
+                      "description": "Which brand library channel this element came from."
+                    },
+                    "name": {
+                      "type": "string",
+                      "description": "Library entry name. For library 'components', this is the component recipe name (e.g. 'cta_pill')."
+                    },
+                    "slot": {
+                      "type": ["string", "null"],
+                      "description": "For library 'components' only — the slot name within the recipe (e.g. 'label', 'icon'). null for non-component sources."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+
+  // Reference: the operations the Canva MCP perform-editing-operations tool
+  // actually supports. This list is the authoritative answer to "what can I
+  // edit?" Any request that doesn't reduce to one of these is unsupported.
+  "supported_edit_operations": [
+    "update_title",
+    "replace_text",
+    "find_and_replace_text",
+    "update_fill",
+    "insert_fill",
+    "delete_element",
+    "position_element",
+    "resize_element",
+    "format_text",
+    "update_autofill_field"
+  ]
+}
