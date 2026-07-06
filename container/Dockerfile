@@ -125,35 +125,50 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 #------------------------------------------
 # TODO: Workaround for OpenCode OAuth.
-# OpenCode binds OAuth callback to 127.0.0.1 only.
-# Relay host:19876 -> container:19877 -> 127.0.0.1:19876
-# Remove once OpenCode supports configurable callback host.
+# OpenCode binds its OAuth callback to 127.0.0.1:<OAUTH_PORT> regardless of the
+# redirect_uri host. This script bridges the loopback listener out to a
+# container-wide 0.0.0.0:<RELAY_PORT> so the host browser can reach the
+# callback via a published port mapping.
+#
+# Ports are configurable per user so multiple users can OAuth concurrently:
+#   MCP_AUTH_OAUTH_PORT  OpenCode loopback listen + redirect_uri port (def 19876)
+#   MCP_AUTH_RELAY_PORT  in-container socat listen port, mapped to host       (def 19877)
+#
+# Chain: browser -> 127.0.0.1:<OAUTH_PORT> (host) -> container:<RELAY_PORT>
+#         -> socat -> 127.0.0.1:<OAUTH_PORT> (OpenCode)
+# The trick: host-published port == OpenCode's internal port, so the redirect_uri
+# OpenCode generates naturally resolves back through the mapping.
+#
+# Remove once OpenCode supports a configurable OAuth callback host.
 COPY <<'EOF' /usr/local/bin/mcp-auth
 #!/bin/bash
 set -euo pipefail
 
-echo "[mcp-auth] Starting OpenCode OAuth flow..."
+OAUTH_PORT="${MCP_AUTH_OAUTH_PORT:-19876}"
+RELAY_PORT="${MCP_AUTH_RELAY_PORT:-19877}"
 
-# Start OpenCode OAuth in the background
+echo "[mcp-auth] Starting OpenCode OAuth flow (oauth=${OAUTH_PORT}, relay=${RELAY_PORT})..."
+
+# Start OpenCode OAuth in the background. Binds 127.0.0.1:${OAUTH_PORT}.
 opencode mcp auth "$@" &
 OPENCODE_PID=$!
 
-echo "[mcp-auth] Waiting for OpenCode to bind to 127.0.0.1:19876..."
+echo "[mcp-auth] Waiting for OpenCode to bind to 127.0.0.1:${OAUTH_PORT}..."
 
-# Wait for OpenCode to start listening
+# Wait for OpenCode to start listening.
 for i in {1..50}; do
-    if ss -ltn 2>/dev/null | grep -q '127.0.0.1:19876'; then
+    if ss -ltn 2>/dev/null | grep -q "127.0.0.1:${OAUTH_PORT}"; then
         echo "[mcp-auth] OpenCode listener detected."
         break
     fi
     sleep 0.2
 done
 
-echo "[mcp-auth] Starting relay 0.0.0.0:19877 -> 127.0.0.1:19876"
+echo "[mcp-auth] Starting relay 0.0.0.0:${RELAY_PORT} -> 127.0.0.1:${OAUTH_PORT}"
 
 socat \
-    TCP-LISTEN:19877,fork,bind=0.0.0.0,reuseaddr \
-    TCP:127.0.0.1:19876 &
+    TCP-LISTEN:${RELAY_PORT},fork,bind=0.0.0.0,reuseaddr \
+    TCP:127.0.0.1:${OAUTH_PORT} &
 SOCAT_PID=$!
 
 cleanup() {
@@ -175,6 +190,13 @@ RUN chmod +x ${APP_DIR}/entrypoint.sh \
 ENV APP_UID=2000
 ENV APP_GID=2000
 
+# Default OAuth callback port for opencode's MCP auth flow. Per-user containers
+# override this (and MCP_AUTH_RELAY_PORT) so multiple users can OAuth concurrently.
+# MUST be set so {env:MCP_AUTH_OAUTH_PORT} in opencode.jsonc interpolates to a
+# valid URI even when no override is provided.
+ENV MCP_AUTH_OAUTH_PORT=19876
+ENV MCP_AUTH_RELAY_PORT=19877
+
 # OpenCode writes here. Mounted as a volume per user so state (auth tokens,
 # session history, generated designs) persists across container restarts and
 # stays isolated between users.
@@ -184,4 +206,4 @@ VOLUME [ "${WORKSPACE_DIR}" ]
 # before handing control to whatever CMD the orchestrator passes (default: an
 # interactive opencode shell).
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
-CMD ["opencode"]
+CMD ["opencode", "serve"]

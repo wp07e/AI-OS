@@ -27,16 +27,25 @@
   // traffic to https://mcp.canva.com/mcp. On first launch the user completes
   // an OAuth flow; the resulting token is cached in their workspace volume so
   // subsequent launches are headless.
-
-  //     TODO: See if redirect is correctly implemented https://github.com/anomalyco/opencode/issues/33966
-  //     "oauth": {
-  //       "redirectUri": "http://127.0.0.1:25376/mcp/oauth/callback"
-  //     }
+  //
+  // The OAuth callback listener binds to 127.0.0.1:<port-from-redirectUri>.
+  // We parameterize it per user via MCP_AUTH_OAUTH_PORT so the host-published
+  // port (which equals this same value) routes the browser callback back
+  // through: host:OAUTH_PORT -> container:RELAY_PORT -> socat ->
+  // 127.0.0.1:OAUTH_PORT (opencode). Default 19876 preserves the original
+  // single-user dev harness behavior when the env var is absent.
+  //
+  // TODO: track https://github.com/anomalyco/opencode/issues/33966 — once
+  // opencode supports a configurable callback *host* (not just port), the
+  // socat relay in /usr/local/bin/mcp-auth can be removed.
   "mcp": {
     "Canva": {
       "type": "remote",
       "url": "https://mcp.canva.com/mcp",
-      "enabled": true
+      "enabled": true,
+      "oauth": {
+        "redirectUri": "http://127.0.0.1:{env:MCP_AUTH_OAUTH_PORT}/mcp/oauth/callback"
+      }
     },
     // xAI Grok MCP — bundled Python server, pre-synced in the image at
     // /app/mcps/grok-mcp. `uv run` reuses the baked venv. The XAI_API_KEY

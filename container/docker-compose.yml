@@ -76,3 +76,9 @@ volumes:
 
 networks:
   ai-os-net:
+    # Pinned name. The web app (web/compose/user.compose.yml +
+    # web/src/lib/docker.ts:ensureNetwork) requires this exact external name.
+    # Without it, compose auto-prefixes with the directory ("container_") and
+    # launchForUser throws "network not found" before ever inserting a container
+    # row — leaving the launching spinner stuck with no logs.
+    name: ai-os_ai-os-net

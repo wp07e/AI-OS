@@ -1,0 +1,55 @@
+# Per-user container template. Launched by the Next.js backend with a unique
+# compose project name (-p aios-<username>) and a per-user .env file.
+#
+# Prerequisites:
+#   - The base image `ai-os-base:latest` must be built from ../container/Dockerfile.
+#   - The external network `ai-os_ai-os-net` and the LiteLLM singleton must be
+#     running (started by ../container/docker-compose.yml).
+#
+# All ${VARS} are substituted from the per-user .env written at launch time.
+
+services:
+  ai-os:
+    image: ai-os-base:latest
+    restart: unless-stopped
+    environment:
+      APP_UID: ${APP_UID}
+      APP_GID: ${APP_GID}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      XAI_API_KEY: ${XAI_API_KEY}
+      LAYERRE_API_KEY: ${LAYERRE_API_KEY}
+      # Parametric mcp-auth ports (consumed by /usr/local/bin/mcp-auth).
+      MCP_AUTH_OAUTH_PORT: ${OAUTH_PORT}
+      MCP_AUTH_RELAY_PORT: ${RELAY_PORT}
+    volumes:
+      # "workspace" is the fixed compose key; its actual name is set in the
+      # top-level volumes: declaration via ${WORKSPACE_VOLUME}.
+      - workspace:/workspace
+    ports:
+      # opencode HTTP — proxied by the Next.js backend.
+      - "${OPENCODE_PORT}:4096"
+      # OAuth relay: host OAUTH_PORT -> container RELAY_PORT -> socat ->
+      # 127.0.0.1:OAUTH_PORT (OpenCode). Host port equals OpenCode's internal
+      # port so the redirect_uri OpenCode generates resolves through the mapping.
+      - "${OAUTH_PORT}:${RELAY_PORT}"
+    command: ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    stdin_open: true
+    tty: true
+    networks:
+      - ai-os-net
+
+networks:
+  ai-os-net:
+    external: true
+    name: ai-os_ai-os-net
+
+# Per-user workspace volume. Created before `compose up` by the backend
+# (ensureVolume in web/src/lib/docker.ts), so it's declared external.
+# Compose v2 requires every named-volume mount source to be declared here;
+# the key is fixed ("workspace") and the actual name is interpolated via
+# ${WORKSPACE_VOLUME}, matching the mount source above.
+volumes:
+  workspace:
+    external: true
+    name: ${WORKSPACE_VOLUME}
