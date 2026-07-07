@@ -327,6 +327,34 @@ export async function stopForUser(userId: number): Promise<void> {
   }
 }
 
+/**
+ * Restarts the user's ai-os container. Used after Canva OAuth completes —
+ * opencode only registers the MCP on a fresh process start, so without a
+ * restart the agent can't see Canva even though the tokens now exist.
+ *
+ * `docker compose restart` preserves the port mapping and the workspace volume;
+ * only the process tree is recreated. We mark the container "launching" again
+ * and proactively invalidate all of the user's cached opencode sessions: the
+ * port stays the same after restart, so the (user, instance, port) cache guard
+ * would otherwise hand back session ids that the restarted server no longer
+ * knows about.
+ */
+export async function restartForUser(userId: number): Promise<void> {
+  const row = getContainerForUser(userId);
+  if (!row) throw new Error("no container for user");
+  const envFile = writeTransientEnv(row);
+  // Invalidate cached sessions BEFORE the restart so concurrent callers don't
+  // observe a stale id during the brief restart window.
+  db().prepare("DELETE FROM opencode_sessions WHERE user_id = ?").run(userId);
+  db().prepare("UPDATE containers SET status = ? WHERE user_id = ?").run("launching", userId);
+  try {
+    const code = await runCompose(["-p", row.project_name, "restart", "ai-os"], envFile);
+    if (code !== 0) throw new Error(`docker compose restart exited with code ${code}`);
+  } finally {
+    rmSync(envFile, { recursive: false, force: true });
+  }
+}
+
 /** Writes a minimal env file with the ports needed by `compose down`. */
 function writeTransientEnv(row: ContainerRow): string {
   const envFile = join(mkdtempSync(join(tmpdir(), "aios-stop-")), "compose.env");

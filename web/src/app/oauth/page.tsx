@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-type Phase = "intro" | "running" | "success" | "error";
+type Phase = "intro" | "running" | "success" | "restarting" | "error";
 
 interface OauthEvent {
   type: "log" | "url" | "success" | "error";
@@ -41,9 +41,12 @@ export default function OauthPage() {
       if (ev.type === "log" && ev.line) appendLog(ev.line);
       else if (ev.type === "url" && ev.url) setAuthorizeUrl(ev.url);
       else if (ev.type === "success") {
-        setPhase("success");
         es.close();
-        setTimeout(() => router.replace("/app"), 1200);
+        // OAuth tokens are now on disk, but opencode only registers the Canva
+        // MCP on a fresh process start. Restart the container so the agent can
+        // actually see Canva, then head to /app.
+        setPhase("restarting");
+        restartAndContinue();
       } else if (ev.type === "error") {
         setError(ev.message ?? "OAuth failed.");
         setPhase("error");
@@ -55,6 +58,20 @@ export default function OauthPage() {
       es.close();
       setPhase((p) => (p === "running" ? "error" : p));
     };
+  }
+
+  async function restartAndContinue() {
+    try {
+      const res = await fetch("/api/oauth/restart", { method: "POST" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string; detail?: string };
+        throw new Error(data.detail ? `${data.error ?? "restart failed"} — ${data.detail}` : data.error ?? "restart failed");
+      }
+      router.replace("/app");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "restart failed");
+      setPhase("error");
+    }
   }
 
   // Auto-start once on mount (intro page still shown briefly while user reads).
@@ -151,6 +168,16 @@ export default function OauthPage() {
           <div className="space-y-2 text-sm">
             <p className="font-medium text-emerald-200">Canva connected successfully.</p>
             <p className="text-[var(--muted)]">Redirecting to your tools…</p>
+          </div>
+        )}
+
+        {phase === "restarting" && (
+          <div className="space-y-2 text-sm">
+            <p className="font-medium text-emerald-200">Canva connected.</p>
+            <p className="text-[var(--muted)]">
+              Restarting your environment so the agent can see Canva…
+            </p>
+            <p className="text-xs text-[var(--muted)]">This takes a few seconds.</p>
           </div>
         )}
 

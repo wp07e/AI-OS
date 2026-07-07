@@ -5,6 +5,8 @@ import { AgentPanel } from "./AgentPanel";
 import { WorkRail } from "./WorkRail";
 import { getWorkflow } from "@/lib/workflows/registry";
 import type { WorkflowState } from "@/lib/workflows/types";
+import { useAgentChat } from "@/lib/hooks/useAgentChat";
+import { AgentChatContext } from "@/lib/hooks/AgentChatContext";
 
 /**
  * Workflow instance row (mirrors the workflow_instances table shape; fetched
@@ -48,28 +50,44 @@ export function AppShell() {
     }
   }, []);
 
+  // Fetch the workflow instances on mount (and whenever refreshInstances is
+  // refreshed from elsewhere). The setState calls happen after an await, so they
+  // don't cause synchronous cascading renders — this is the external-system-sync
+  // case the rule is meant to permit.
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshInstances();
   }, [refreshInstances]);
 
   const active = instances.find((i) => i.id === activeId) ?? null;
 
+  // One chat per active lane. Keyed on the active instance id; the hook resets
+  // visible history on lane switch. Provided via context so any canvas can
+  // trigger templated messages (chat-trigger buttons) without going through the
+  // CanvasProps contract.
+  const chat = useAgentChat(active?.id ?? null);
+
   return (
-    <div className="grid flex-1 grid-cols-[240px_1fr_380px] overflow-hidden">
-      <WorkRail
-        instances={instances}
-        activeId={activeId}
-        onSelect={setActiveId}
-        onRefresh={refreshInstances}
-        loading={loadingInstances}
-      />
+    <AgentChatContext.Provider value={chat}>
+      <div className="grid flex-1 grid-cols-[240px_1fr_380px] overflow-hidden">
+        <WorkRail
+          instances={instances}
+          activeId={activeId}
+          onSelect={setActiveId}
+          onRefresh={refreshInstances}
+          loading={loadingInstances}
+        />
 
-      <section className="flex min-w-0 flex-col overflow-hidden border-x border-white/10">
-        {active ? <WorkflowCanvas instance={active} /> : <EmptyCanvas />}
-      </section>
+        <section className="flex min-w-0 flex-col overflow-hidden border-x border-white/10">
+          {active ? <WorkflowCanvas instance={active} /> : <EmptyCanvas />}
+        </section>
 
-      <AgentPanel workflowInstanceId={active?.id ?? null} workflowType={active?.workflow_type ?? null} />
-    </div>
+        <AgentPanel
+          workflowInstanceId={active?.id ?? null}
+          workflowType={active?.workflow_type ?? null}
+        />
+      </div>
+    </AgentChatContext.Provider>
   );
 }
 

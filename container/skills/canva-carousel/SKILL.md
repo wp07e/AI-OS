@@ -59,6 +59,65 @@ library referenced by slides. Each channel gets into Canva differently:
 
 ---
 
+## Status contract — `state.json` + `memory.md`
+
+The generic `state.json` shape (`phase` / `lastUpdated` / `errors`) and the
+`memory.md` resume contract are defined once in **`/workspace/AGENTS.md** — read
+it for the rules that apply to every workflow. This section covers only what's
+**carousel-specific**.
+
+The Carousel Studio canvas polls `state.json` to render slides, copy, and the
+Canva link. Beyond the three required fields, enrich `state.json` with these
+carousel fields as they become known:
+
+```jsonc
+{
+  // ...phase, lastUpdated, errors per /workspace/AGENTS.md...
+  "brief": {                               // filled at Phase 1
+    "topic": "...",
+    "aspect_ratio": "4:5",
+    "slide_count": 6
+  },
+  "slides": [                              // filled at Phase 1, refined at Phase 4
+    { "index": 0, "headline": "...", "body": "...", "cta": "...", "archetype": "hero" },
+    ...
+  ],
+  "design": {                              // filled at Phase 3
+    "design_id": "D...",
+    "canva_url": "https://www.canva.com/design/..."
+  }
+}
+```
+
+**Phase → `phase` string map** (write a fresh `state.json` at each boundary):
+
+| Skill phase | `phase` value | When |
+|---|---|---|
+| Phase 1 start / end | `planning` | Parsing the brief |
+| Phase 2 start | `resolving_assets` | Generating/uploading assets |
+| Phase 2 end | `assets_resolved` | All asset_ids captured |
+| Phase 3 start | `generating_design` | `generate-design` kicked off |
+| Phase 3 end | `design_generated` | Candidate accepted, `design_id` known — **fill `design` now** |
+| Phase 4 start | `capturing_template` | Walking pages |
+| Phase 4 end | `template_captured` | `template.json` written — **refine `slides[]` copy if Canva rewrote it** |
+| Phase 5 start | `exporting` | `export-design` running |
+| Phase 5 end | `complete` | Exports + report done |
+| Any error | (keep current phase, or `"<phase>_failed"`) | Push a human-readable string to `errors[]` |
+
+On any failure, follow the error rule in `/workspace/AGENTS.md` (push a
+human-readable string to `errors[]`, keep the phase honest) before reporting.
+
+### Folder naming
+
+This skill's prose says `/workspace/carousels/<deck_id>/`. In the AI OS shell,
+**`<deck_id>` is the workflow instance id** — the host creates the folder as
+`/workspace/carousels/<instance-id>/` when the instance is made, and the
+per-instance `AGENTS.md` in that folder names it concretely. Use the active
+instance folder (the one whose `AGENTS.md` you read on startup) as the deck
+folder. Do not invent your own `<deck_id>`.
+
+---
+
 ## The hard constraint (read this before any edit phase)
 
 The Canva MCP **cannot add elements** to an existing design. Supported edit
@@ -100,13 +159,18 @@ subsequent invocations when they want to edit.
 2. Create the deck folder: `/workspace/carousels/<deck_id>/`. Copy the brief
    to `/workspace/carousels/<deck_id>/brief.json`. Create empty `assets/` and
    `exports/` subdirs.
-3. **Validate the brand library references.** Every name that appears in any
+3. **Write `state.json`** with `phase: "planning"`, `brief` {topic,
+   aspect_ratio, slide_count}, and a `slides[]` entry per slide (index,
+   headline, body, cta, archetype — copied from the brief). This is what makes
+   the canvas filmstrip + copy panel appear before any rendering happens.
+4. **Validate the brand library references.** Every name that appears in any
    slide's `icons[]`, `assets[]`, or `components[].name` MUST exist as a key
    in the corresponding `brand.icons` / `brand.assets` / `brand.components`
    block. Same for component `slots[].ref` values, which may point at either
    `brand.icons` or `brand.assets`. Fail fast with a clear message:
-   `"slide N references icon 'X' but brand.icons has no entry named 'X'"`.
-4. Inventory asset directives across the whole brief:
+   `"slide N references icon 'X' but brand.icons has no entry named 'X'"`
+   (and push it to `state.errors` before reporting).
+5. Inventory asset directives across the whole brief:
    - every `brand.icons.*`, `brand.assets.*`, `brand.logo`, `slides[].image`
    - every component slot whose value is `{url}` / `{generate}` / `{ref}`
    Classify each as `{url}`, `{generate:true, brief}`, `{ref:"<name>"}` (resolve
@@ -114,6 +178,8 @@ subsequent invocations when they want to edit.
    or `null`.
 
 ### Phase 2 — Resolve assets
+
+**Write `state.json` with `phase: "resolving_assets"` before you start.**
 
 For every `{"generate": true, "brief": "..."}` directive (deduplicated by
 brief text — generate once, reuse):
@@ -143,7 +209,13 @@ Build the deck-level `brand_resolved` map per `template.schema.jsonc`:
 Description-only channels (`colors`, `typography`, `components`) require no
 uploads. They get rendered into the prompt verbatim at Phase 3.
 
+**Write `state.json` with `phase: "assets_resolved"` once the `brand_resolved`
+map is complete.**
+
 ### Phase 3 — Generate
+
+**Write `state.json` with `phase: "generating_design"` before calling
+`generate-design`.**
 
 Build the `generate-design` prompt from brand + slides. Use archetype names
 from `layouts.registry.jsonc` as composition vocabulary.
@@ -210,7 +282,13 @@ design URL.
 If generation produced the wrong aspect ratio, surface it to the user and
 either accept or regenerate — do not silently proceed.
 
+**Write `state.json` with `phase: "design_generated"` and fill the `design`
+field (`design_id` + `canva_url`) now** — this is what surfaces the "Open in
+Canva" link in the canvas.
+
 ### Phase 4 — Capture template
+
+**Write `state.json` with `phase: "capturing_template"` before walking pages.**
 
 1. Call `start-editing-transaction` with the `design_id`.
 2. Walk every page via `get-design-pages` (and `get-design-content` for
@@ -250,7 +328,14 @@ either accept or regenerate — do not silently proceed.
 8. `commit-editing-transaction` (or `cancel-editing-transaction` if you only
    walked pages and changed nothing).
 
+**Write `state.json` with `phase: "template_captured"`.** If Canva rewrote any
+slide's headline/body/cta during generation (it often does), update the
+matching `slides[]` entry in `state.json` to match what's actually in the design
+so the canvas copy panel reflects reality.
+
 ### Phase 5 — Export & report
+
+**Write `state.json` with `phase: "exporting"` before you call `export-design`.**
 
 1. For each entry in `brief.exports[]`, call `export-design` with the
    `design_id`:
@@ -266,7 +351,15 @@ either accept or regenerate — do not silently proceed.
      ratio, invented body copy) — with a one-line remedy for each ("Phase 6:
      `replace_text` on element X to restore verbatim copy").
 
+**Write `state.json` with `phase: "complete"`.** Then **append a handoff to
+`memory.md`** (per the Status contract above): status, decisions, what to do
+next on resume, and any gotchas (font fallbacks, deviations, asset re-uploads).
+This is what lets the user switch away and come back without losing context.
+
 ### Phase 6 — Future edits (separate invocation)
+
+**Before editing, read `memory.md` and `state.json`** to pick up where the
+previous session left off (the lane session may have been resumed fresh).
 
 When the user comes back to edit an existing deck:
 

@@ -53,15 +53,27 @@ export function useWorkspaceState<S extends WorkflowState>(
   const [state, setState] = useState<S | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
+  // Hold the latest parse fn in a ref synced during the commit phase so `refresh`
+  // can stay stable (empty deps) without going stale and without touching a ref
+  // during render.
   const parseRef = useRef(parse);
-  parseRef.current = parse;
+  useEffect(() => {
+    parseRef.current = parse;
+  }, [parse]);
+
+  // Reset when the instance changes. Using React's "adjust state during render"
+  // pattern (store the tracked id in state, not a ref, so the gate is on a state
+  // value — which the linter accepts — rather than a ref write during render).
+  const [trackedInstanceId, setTrackedInstanceId] = useState<string | null>(instanceId);
+  if (trackedInstanceId !== instanceId) {
+    setTrackedInstanceId(instanceId);
+    setState(null);
+    setError(null);
+    setIsLoading(Boolean(instanceId));
+  }
 
   const refresh = useCallback(async () => {
-    if (!instanceId) {
-      setState(null);
-      setIsLoading(false);
-      return;
-    }
+    if (!instanceId) return;
     try {
       const res = await fetch(`/api/workspace/${instanceId}/state`, {
         cache: "no-store",
@@ -80,14 +92,9 @@ export function useWorkspaceState<S extends WorkflowState>(
     }
   }, [instanceId]);
 
-  // Poll on interval, focus-aware.
+  // Poll on interval, focus-aware. Skipped entirely when there's no instance.
   useEffect(() => {
-    if (!instanceId) {
-      setState(null);
-      setIsLoading(false);
-      return;
-    }
-    setIsLoading(true);
+    if (!instanceId) return;
     refresh();
 
     let timer: ReturnType<typeof setInterval> | null = null;

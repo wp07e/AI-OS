@@ -37,14 +37,17 @@ For example, a carousel instance lives at:
 ## Which instance you're working on
 
 When a user starts work on an instance, **that instance's folder is the active
-context.** The folder path is not injected into your messages (injection caused
-problems). Instead, discover your active instance deterministically:
+context.** On the first message of a new instance the host primes your session
+with the concrete folder path — use it directly. If for any reason you need to
+re-discover the active instance, do it deterministically:
 
-1. **First, check the most recently modified workflow folder.** List the
+1. **Check the most recently modified workflow folder.** List the
    subdirectories of `/workspace/carousels/` (or the relevant
-   `/workspace/<type>/`). The instance with the newest `state.json` or
-   `memory.md` is almost certainly the active one. Open that folder's
-   `AGENTS.md` — it names the instance concretely.
+   `/workspace/<type>/`) by **folder modification time** (a brand-new instance
+   has no `state.json` yet — fall back to `state.json`/`memory.md` mtime only
+   when present, otherwise use the directory's own mtime). The newest is almost
+   certainly the active one. Open that folder's `AGENTS.md` — it names the
+   instance concretely.
 2. **If a folder contains an `AGENTS.md`, read it first** — it states the
    instance's type, title, folder path, and skill. Treat that folder as your
    working directory for all file operations in this session.

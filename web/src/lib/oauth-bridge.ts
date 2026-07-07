@@ -12,9 +12,10 @@ export type OauthEvent =
   | { type: "error"; message: string };
 
 /**
- * Runs `docker compose -p <project> exec ai-os mcp-auth Canva` and emits
- * streaming events as stdout is parsed. The browser opens the authorize URL;
- * the redirect hits the published OAuth port and OpenCode completes the flow.
+ * Runs `docker compose -p <project> exec --user 2000:2000 ai-os mcp-auth Canva`
+ * (as the appuser, HOME=/workspace) and emits streaming events as stdout is
+ * parsed. The browser opens the authorize URL; the redirect hits the published
+ * OAuth port and OpenCode completes the flow.
  *
  * The optional signal lets the caller cancel mid-flight.
  */
@@ -26,6 +27,15 @@ export function startOauthFlow(
   return new Promise((resolve, reject) => {
     let proc: ChildProcessByStdio<null, Readable, Readable>;
     try {
+      // Run mcp-auth AS THE APPUSER (uid 2000, HOME=/workspace) — not as root.
+      // `docker compose exec` defaults to the container's configured user,
+      // which is root here (the service has no `user:` directive; the
+      // entrypoint's gosu drop only applies to the main CMD). If mcp-auth runs
+      // as root, `opencode mcp auth` writes the completed token to
+      // /root/.local/share/opencode/mcp-auth.json, but `opencode serve` runs as
+      // appuser and reads /workspace/.local/share/opencode/mcp-auth.json — so
+      // Canva would report needs_auth forever. Forcing the exec user + HOME
+      // makes the token land where serve reads it.
       proc = spawn(
         "docker",
         [
@@ -35,6 +45,10 @@ export function startOauthFlow(
           "-f",
           COMPOSE_FILE,
           "exec",
+          "--user",
+          "2000:2000",
+          "--env",
+          "HOME=/workspace",
           "ai-os",
           "mcp-auth",
           "Canva",
