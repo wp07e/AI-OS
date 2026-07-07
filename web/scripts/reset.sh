@@ -9,8 +9,8 @@
 # What gets removed:
 #   - Every running or stopped aios-* container (the per-user containers)
 #   - Every aios-* docker volume (per-user workspaces)
-#   - All rows in sessions, containers, opencode_sessions (login state, port
-#     allocations, cached opencode sessions)
+#   - All rows in sessions, containers, opencode_sessions, workflow_instances
+#     (login state, port allocations, cached opencode sessions, workflow lanes)
 #   - Any next dev / next-server process holding port 3000
 #
 # What is PRESERVED:
@@ -77,9 +77,10 @@ else
 fi
 
 # ─── 4. literal:Wipe DB rows (keep schema + the seeded user) ──────────────────────
-log "clearing sessions / containers / opencode_sessions rows in DB"
+log "clearing sessions / containers / opencode_sessions / workflow_instances rows in DB"
 sqlite3 "$DB_PATH" \
   "DELETE FROM opencode_sessions;
+   DELETE FROM workflow_instances;
    DELETE FROM containers;
    DELETE FROM sessions;"
 
@@ -106,10 +107,11 @@ fi
 # ─── 6. Summary ────────────────────────────────────────────────────────────
 log "DB row counts:"
 sqlite3 "$DB_PATH" \
-  "SELECT '  users:             ' || count(*) FROM users;
-   SELECT '  sessions:          ' || count(*) FROM sessions;
-   SELECT '  containers:        ' || count(*) FROM containers;
-   SELECT '  opencode_sessions: ' || count(*) FROM opencode_sessions;"
+  "SELECT '  users:              ' || count(*) FROM users;
+   SELECT '  sessions:           ' || count(*) FROM sessions;
+   SELECT '  containers:         ' || count(*) FROM containers;
+   SELECT '  opencode_sessions:  ' || count(*) FROM opencode_sessions;
+   SELECT '  workflow_instances: ' || count(*) FROM workflow_instances;"
 
 echo
 printf '\033[1;32m[reset] done.\033[0m State is clean. To start fresh:\n'

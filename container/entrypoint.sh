@@ -47,7 +47,11 @@ fi
 shopt -s dotglob nullglob
 if [ -z "$(ls -A "${WORKSPACE_DIR}" 2>/dev/null || true)" ]; then
   echo "[entrypoint] initializing empty workspace at ${WORKSPACE_DIR}"
-  cp -n -R "${APP_DIR}/opencode.jsonc" "${WORKSPACE_DIR}/" 2>/dev/null || true
+  cp -f -R "${APP_DIR}/opencode.jsonc" "${WORKSPACE_DIR}/" 2>/dev/null || true
+  # AGENTS.md is the agent's permanent environment context (where /workspace is,
+  # how instances + state.json + memory.md work). Always copy so the agent knows
+  # its operating environment from the first session.
+  cp -f -R "${APP_DIR}/AGENTS.md" "${WORKSPACE_DIR}/" 2>/dev/null || true
   [ -d "${APP_DIR}/skills" ]   && cp -n -R "${APP_DIR}/skills"   "${WORKSPACE_DIR}/" 2>/dev/null || true
   [ -d "${APP_DIR}/fixtures" ] && cp -n -R "${APP_DIR}/fixtures" "${WORKSPACE_DIR}/" 2>/dev/null || true
 fi

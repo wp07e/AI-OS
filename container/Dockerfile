@@ -82,6 +82,7 @@ WORKDIR ${APP_DIR}
 # Bake the read-only artifacts.
 COPY entrypoint.sh ${APP_DIR}/entrypoint.sh
 COPY opencode.jsonc ${APP_DIR}/opencode.jsonc
+COPY AGENTS.md      ${APP_DIR}/AGENTS.md
 COPY skills/        ${APP_DIR}/skills/
 COPY fixtures/      ${APP_DIR}/fixtures/
 

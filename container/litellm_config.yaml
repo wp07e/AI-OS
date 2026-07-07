@@ -7,24 +7,36 @@
 # OpenRouter is a first-class LiteLLM backend, so we just declare the route.
 # The OpenRouter API key is read from env (never baked into this file).
 
+# Drop provider-unsupported params silently. OpenCode sends reasoningEffort
+# (translated to reasoning_effort by the OpenAI-compatible client); OpenRouter
+# exposes reasoning via a different field, so without drop_params LiteLLM 400s.
+# Dropping is safe — it only affects params the provider rejects anyway.
+litellm_settings:
+  drop_params: true
+
 model_list:
   # The model_name is what OpenCode requests (litellm/<model_name>).
   # The litellm_params.model is the OpenRouter slug LiteLLM forwards to.
+  #
+  # Primary: DeepSeek V4 Flash (nitro tier — faster, fewer rate limits than the
+  # free tier). Reasoning effort is configured on the OpenCode side
+  # (opencode.jsonc) so the agent controls how hard the model reasons.
   - model_name: default
     litellm_params:
-      model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
+      model: openrouter/deepseek/deepseek-v4-flash:nitro
       api_key: os.environ/OPENROUTER_API_KEY
 
-  # Optional: expose a cheaper model for low-stakes work. OpenCode can target
-  # it explicitly as litellm/fast. Comment out if you only want one route.
-  # - model_name: fast
+  # Backup model kept for reference / future use. The free nemotron tier that
+  # was the original default — uncomment and wire a `router_settings.fallbacks`
+  # block (which requires a LiteLLM database_url) to enable automatic failover.
+  # - model_name: default-fallback
   #   litellm_params:
-  #     model: openrouter/anthropic/claude-3.5-haiku
+  #     model: openrouter/nvidia/nemotron-3-ultra-550b-a55b:free
   #     api_key: os.environ/OPENROUTER_API_KEY
 
 general_settings:
   # LiteLLM's own master key — used to administer virtual keys. Keep secret.
   master_key: os.environ/LITELLM_MASTER_KEY
   # Optional: persist spend/usage to SQLite so per-tenant metering survives
-  # restarts. Comment in when you want budget tracking.
+  # restarts. Required if you later enable router_settings.fallbacks.
   # database_url: os.environ/LITELLM_DATABASE_URL

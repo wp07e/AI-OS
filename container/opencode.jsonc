@@ -12,16 +12,46 @@
       },
       "models": {
         "default": {
-          "name": "litellm/default"
+          "name": "litellm/default",
+          // DeepSeek V4 Flash supports graded reasoning effort. `high` is the
+          // sweet spot for agent work — `max`/`xhigh` burn tokens for marginal
+          // gains. Bumped here from the default so the agent reasons more
+          // deliberately about workflow steps. The actual model slug is set in
+          // container/litellm_config.yaml; this option rides along on every
+          // request OpenCode sends through LiteLLM.
+          "options": {
+            "reasoningEffort": "high"
+          }
         }
       }
     }
   },
-  // Skills ship in the image under ./skills; expose all of them.
+  // Permissions — full autonomous access. This is the user's own container
+  // running their own agent; there is no interactive terminal to approve
+  // prompts, and any "ask" permission would hang the HTTP API indefinitely
+  // (the permission prompt can't surface through /session/:id/message).
+  // So every tool is set to "allow" — equivalent to a /yolo mode.
+  //
+  // CRITICAL: "external_directory" must be "allow" — OpenCode's worktree is
+  // /app (where the process starts), but all workflow work happens under
+  // /workspace. Without this, every file access outside /app triggers a
+  // permission prompt that hangs the request.
   "permission": {
-    "skill": {
-      "*": "allow"
-    }
+    "edit": "allow",
+    "bash": "allow",
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "task": "allow",
+    "external_directory": "allow",
+    "todowrite": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "lsp": "allow",
+    "skill": { "*": "allow" },
+    "question": "allow",
+    "doom_loop": "allow"
   },
   // Official Canva MCP server (remote, OAuth). mcp-remote bridges stdio MCP
   // traffic to https://mcp.canva.com/mcp. On first launch the user completes
@@ -91,7 +121,7 @@
         "python",
         "main.py"
       ],
-      "enabled": true,
+      "enabled": false,
       "environment": {
         "LAYERRE_API_KEY": "{env:LAYERRE_API_KEY}"
       }

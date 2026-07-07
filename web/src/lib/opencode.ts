@@ -78,18 +78,27 @@ export async function sendMessage(
   sessionId: string,
   text: string,
 ): Promise<OpencodeMessageResponse> {
-  const res = await fetch(opencodeUrl(port, `/session/${sessionId}/message`), {
+  const url = opencodeUrl(port, `/session/${sessionId}/message`);
+  const t0 = Date.now();
+  console.log(`[opencode] POST ${url} — fetch start (text ${text.length} chars)`);
+  const res = await fetch(url, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify({
       parts: [{ type: "text", text }],
     }),
   });
+  const fetchMs = Date.now() - t0;
+  console.log(`[opencode] POST ${url} — response ${res.status} after ${fetchMs}ms`);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
+    console.error(`[opencode] POST ${url} — non-OK body:`, body.slice(0, 500));
     throw new Error(`POST /session/${sessionId}/message → ${res.status}: ${body || "<no body>"}`);
   }
-  return (await res.json()) as OpencodeMessageResponse;
+  const jsonStart = Date.now();
+  const parsed = (await res.json()) as OpencodeMessageResponse;
+  console.log(`[opencode] POST ${url} — json parsed in ${Date.now() - jsonStart}ms, ${parsed.parts?.length ?? 0} parts`);
+  return parsed;
 }
 
 /** Extracts concatenated assistant text from a message response's parts. */
@@ -101,21 +110,39 @@ export function extractAssistantText(res: OpencodeMessageResponse): string {
     .trim();
 }
 
-// ─── Per-user session caching ───────────────────────────────────────────────
+// ─── Per-(user, workflow_instance) session caching ──────────────────────────
+//
+// One OpenCode process per user container serves many sessions on a single
+// port. Each workflow instance (lane) gets its own opencode session id, cached
+// here so multi-turn conversations persist across requests. The cache is
+// mirrored on opencode_port so a container relaunch (new port) invalidates it.
+//
+// IMPORTANT: OpenCode serializes message processing per session. Two concurrent
+// fetches to /session/:id/message on the same session will queue — the second
+// waits for the first to complete. So we NEVER fire-and-forget a "prime"
+// message alongside the real one. Workflow context is grounded by the ROUTE
+// caller (it constructs a grounded first message), not by this function.
 
 interface CachedSession {
   user_id: number;
+  workflow_instance_id: string;
   session_id: string;
   opencode_port: number;
 }
 
-/** Returns a usable opencode session id for the user, creating + caching if needed. */
-export async function getOrCreateSession(row: ContainerRow): Promise<string> {
+/**
+ * Returns a usable opencode session id for the given workflow instance, creating
+ * + caching one if needed. Reuses the cached session only if it's on the same
+ * port (i.e. the same container). Does NOT prime — see note above.
+ */
+export async function getOrCreateSession(
+  row: ContainerRow,
+  workflowInstanceId: string,
+): Promise<string> {
   const cached = db()
-    .prepare("SELECT * FROM opencode_sessions WHERE user_id = ?")
-    .get(row.user_id) as CachedSession | undefined;
+    .prepare("SELECT * FROM opencode_sessions WHERE user_id = ? AND workflow_instance_id = ?")
+    .get(row.user_id, workflowInstanceId) as CachedSession | undefined;
 
-  // Reuse if the cached session is on the same port (i.e. same container).
   if (cached && cached.opencode_port === row.opencode_port) {
     return cached.session_id;
   }
@@ -123,18 +150,21 @@ export async function getOrCreateSession(row: ContainerRow): Promise<string> {
   const sessionId = await createSession(row.opencode_port);
   db()
     .prepare(
-      `INSERT INTO opencode_sessions (user_id, session_id, opencode_port, created_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(user_id) DO UPDATE SET
+      `INSERT INTO opencode_sessions (user_id, workflow_instance_id, session_id, opencode_port, created_at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, workflow_instance_id) DO UPDATE SET
          session_id = excluded.session_id,
          opencode_port = excluded.opencode_port,
          created_at = excluded.created_at`,
     )
-    .run(row.user_id, sessionId, row.opencode_port, Date.now());
+    .run(row.user_id, workflowInstanceId, sessionId, row.opencode_port, Date.now());
+
   return sessionId;
 }
 
-/** Clears the cached session (e.g. if the server rejects it). Forces a fresh one next call. */
-export function invalidateSession(userId: number): void {
-  db().prepare("DELETE FROM opencode_sessions WHERE user_id = ?").run(userId);
+/** Clears the cached session for a workflow instance (e.g. if the server rejects it). */
+export function invalidateSession(userId: number, workflowInstanceId: string): void {
+  db()
+    .prepare("DELETE FROM opencode_sessions WHERE user_id = ? AND workflow_instance_id = ?")
+    .run(userId, workflowInstanceId);
 }

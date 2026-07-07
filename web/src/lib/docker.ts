@@ -351,3 +351,131 @@ function writeTransientEnv(row: ContainerRow): string {
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// ─── In-container command execution ─────────────────────────────────────────
+//
+// Used by the workflow layer (and later the workspace polling layer) to run
+// commands inside a user's container as the container's app user — e.g.
+// `mkdir -p /workspace/carousels/<id>`. The same `docker compose -p ... exec`
+// pattern is used by oauth-bridge.ts; centralizing it here keeps the args
+// consistent.
+
+/**
+ * Runs a command inside the user's ai-os container. Returns { code, stdout }.
+ * Throws if docker itself fails to spawn (a non-zero exit code is returned,
+ * not thrown — callers decide how to handle it).
+ */
+export function execInContainer(
+  row: ContainerRow,
+  command: string[],
+  opts: { user?: string } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolveP, reject) => {
+    const args = [
+      "compose",
+      "-p",
+      row.project_name,
+      "-f",
+      COMPOSE_FILE,
+      "exec",
+      ...(opts.user ? ["--user", opts.user] : []),
+      "ai-os",
+      ...command,
+    ];
+    const proc = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => (stdout += d.toString()));
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    proc.on("error", reject);
+    proc.on("exit", (code) => resolveP({ code: code ?? 0, stdout, stderr }));
+  });
+}
+
+// ─── Workspace file access ──────────────────────────────────────────────────
+//
+// The workspace lives inside the container (/workspace/<folder>/<id>), mounted
+// via a Docker volume. The host Next.js reads it via `docker compose exec`,
+// keeping the exec pattern centralized here rather than reaching into Docker's
+// volume driver. The skill (in-container) writes files; the canvas (host) reads
+// them through these helpers + the /api/workspace/* routes.
+//
+// All paths are container-absolute. Routes resolve them from the workflow
+// instance's `folder` column (already /workspace/...) after ownership checks.
+
+const APP_USER = "appuser";
+
+/**
+ * Reads a workspace file as UTF-8 text. Returns null if the file is missing
+ * (exit code 1 from cat); callers treat absence as non-fatal per the design
+ * contract (canvas shows "working…" and keeps polling).
+ */
+export async function readWorkspaceFileText(
+  row: ContainerRow,
+  path: string,
+): Promise<string | null> {
+  const r = await execInContainer(row, ["cat", path], { user: APP_USER });
+  if (r.code !== 0) return null; // file missing or unreadable → null, not throw
+  return r.stdout;
+}
+
+/**
+ * Reads a workspace file as a Buffer (for binary assets: PNG, PDF, etc.).
+ * Returns null if the file is missing.
+ */
+export async function readWorkspaceFileBuffer(
+  row: ContainerRow,
+  path: string,
+): Promise<Buffer | null> {
+  return new Promise((resolveP, reject) => {
+    const args = [
+      "compose",
+      "-p",
+      row.project_name,
+      "-f",
+      COMPOSE_FILE,
+      "exec",
+      "--user",
+      APP_USER,
+      "ai-os",
+      "cat",
+      path,
+    ];
+    const proc = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const chunks: Buffer[] = [];
+    let stderr = "";
+    proc.stdout.on("data", (d: Buffer) => chunks.push(d));
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    proc.on("error", reject);
+    proc.on("exit", (code) => {
+      if (code !== 0) resolveP(null); // missing file → null
+      else resolveP(Buffer.concat(chunks));
+    });
+  });
+}
+
+/**
+ * Lists the files (relative names) in a workspace directory, non-recursively.
+ * Returns [] if the directory is missing.
+ */
+export async function listWorkspaceDir(
+  row: ContainerRow,
+  path: string,
+): Promise<string[]> {
+  // `ls -1A` gives one name per line, including dotfiles, excluding . and ..
+  const r = await execInContainer(row, ["ls", "-1A", path], { user: APP_USER });
+  if (r.code !== 0) return [];
+  return r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * Probes whether a workspace path exists (file or directory).
+ */
+export async function workspacePathExists(
+  row: ContainerRow,
+  path: string,
+): Promise<boolean> {
+  // `test -e` is silent on success (exit 0) and silent on failure (exit 1).
+  const r = await execInContainer(row, ["test", "-e", path], { user: APP_USER });
+  return r.code === 0;
+}
