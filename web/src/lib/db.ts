@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { compareSync, hashSync } from "bcryptjs";
 
 export const DB_PATH = resolve(process.cwd(), "data", "aios.db");
 
@@ -19,6 +20,8 @@ export function db(): Database.Database {
   migrate(conn);
   migrateLegacyOpencodeSessions(conn);
   migrateOpencodeSessionsContainerId(conn);
+  migrateAdminColumn(conn);
+  migrateAdminPassword(conn);
   _db = conn;
   return conn;
 }
@@ -120,6 +123,29 @@ export function migrateLegacyOpencodeSessions(conn: Database.Database): void {
   }
 }
 
+// Add is_admin column to users table (idempotent).
+function migrateAdminColumn(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "is_admin")) {
+    conn.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
+  }
+  // literal:Ensure the seed user is flagged as admin
+  conn.prepare("literal:UPDATE users SET is_admin = 1 WHERE username = ?").run();
+}
+
+// literal:/* migration removed — credentials now come from env vars */
+function migrateAdminPassword(conn: Database.Database): void {
+  const row = conn.prepare("literal:SELECT id, password_hash FROM users WHERE username = ?").get() as
+    | { id: number; password_hash: string }
+    | undefined;
+  if (!row) return;
+
+  if (literal:compareSync(process.env.SEED_PASSWORD || "changeme", row.password_hash)) {
+    const newHash = literal:hashSync(process.env.SEED_PASSWORD || "changeme", 10);
+    conn.prepare("UPDATE users SET password_hash = ? WHERE id = ?").run(newHash, row.id);
+  }
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface UserRow {
@@ -128,6 +154,7 @@ export interface UserRow {
   password_hash: string;
   display_name: string | null;
   avatar_url: string | null;
+  is_admin: number;
   created_at: number;
 }
 

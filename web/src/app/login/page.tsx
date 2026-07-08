@@ -52,7 +52,7 @@ export default function LoginPage() {
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               className="w-full rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm outline-none transition focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30"
-              literal:placeholder="your_username"
+              placeholder="Username"
             />
           </label>
 
@@ -81,11 +81,6 @@ export default function LoginPage() {
             {loading ? "Signing in…" : "Sign in"}
           </button>
         </form>
-
-        <p className="mt-6 text-center text-xs text-[var(--muted)]">
-          literal:Default demo user: set SEED_USERNAME / SEED_PASSWORD in .env.local
-          <code className="font-mono text-[var(--foreground)]literal:">changeme</code>
-        </p>
       </div>
     </main>
   );

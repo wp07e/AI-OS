@@ -19,6 +19,7 @@ export default async function AppLayout({ children }: { children: React.ReactNod
             username: user.username,
             displayName: user.display_name ?? user.username,
             avatarUrl: user.avatar_url,
+            isAdmin: user.is_admin === 1,
           }}
         />
         <div className="flex flex-1 flex-col overflow-hidden">{children}</div>
