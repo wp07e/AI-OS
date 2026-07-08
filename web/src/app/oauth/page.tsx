@@ -12,6 +12,57 @@ interface OauthEvent {
   message?: string;
 }
 
+interface RelayInfo {
+  token: string;
+  server: string;
+  oauthPort: number;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Tiny copy-to-clipboard block used inside each OS <details>       */
+/* ------------------------------------------------------------------ */
+function CommandBlock({ command }: { command: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function doCopy() {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Fallback for insecure contexts
+      const ta = document.createElement("textarea");
+      ta.value = command;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }
+  }
+
+  return (
+    <div className="group/cmd relative">
+      <pre className="mt-0.5 rounded bg-black/40 p-1.5 pr-16 font-mono text-[10px] text-amber-100/90 overflow-x-auto whitespace-pre-wrap">
+        <code>{command}</code>
+      </pre>
+      <button
+        type="button"
+        onClick={doCopy}
+        className="absolute right-1.5 top-1.5 rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-medium text-amber-200 opacity-0 transition group-hover/cmd:opacity-100 hover:bg-amber-500/40"
+      >
+        {copied ? "✓ Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Main page component                                               */
+/* ------------------------------------------------------------------ */
 export default function OauthPage() {
   const router = useRouter();
   const [phase, setPhase] = useState<Phase>("intro");
@@ -19,6 +70,7 @@ export default function OauthPage() {
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [relayInfo, setRelayInfo] = useState<RelayInfo | null>(null);
 
   function appendLog(line: string) {
     setLogs((prev) => [...prev.slice(-100), line]);
@@ -42,9 +94,6 @@ export default function OauthPage() {
       else if (ev.type === "url" && ev.url) setAuthorizeUrl(ev.url);
       else if (ev.type === "success") {
         es.close();
-        // OAuth tokens are now on disk, but opencode only registers the Canva
-        // MCP on a fresh process start. Restart the container so the agent can
-        // actually see Canva, then head to /app.
         setPhase("restarting");
         restartAndContinue();
       } else if (ev.type === "error") {
@@ -54,10 +103,23 @@ export default function OauthPage() {
       }
     };
     es.onerror = () => {
-      // Browser may also close when the stream ends; only fail if we never got URL/success.
       es.close();
       setPhase((p) => (p === "running" ? "error" : p));
     };
+  }
+
+  async function fetchRelayToken() {
+    try {
+      const res = await fetch("/api/oauth/relay-token");
+      if (res.ok) {
+        const data = (await res.json()) as RelayInfo;
+        setRelayInfo(data);
+      }
+      // If it fails (401, 409), just don't show the relay panel.
+      // The user may be running locally and doesn't need it.
+    } catch {
+      // Network error — ignore silently
+    }
   }
 
   async function restartAndContinue() {
@@ -74,9 +136,6 @@ export default function OauthPage() {
     }
   }
 
-  // Auto-start once on mount (intro page still shown briefly while user reads).
-  // We keep the intro so the user has explicit consent; OK triggers start().
-
   async function copy() {
     if (!authorizeUrl) return;
     await navigator.clipboard.writeText(authorizeUrl);
@@ -87,6 +146,16 @@ export default function OauthPage() {
   function openInBrowser() {
     if (!authorizeUrl) return;
     window.open(authorizeUrl, "_blank", "noopener,noreferrer");
+  }
+
+  /** macOS / Linux: curl downloads the script inline, then python3 runs it. */
+  function buildUnixCommand(info: RelayInfo): string {
+    return `cd /tmp && curl -fsSLO https://github.com/anomalyco/ai-os/raw/main/scripts/canva-oauth-relay.py && python3 canva-oauth-relay.py --port ${info.oauthPort} --server ${info.server} --token ${info.token}`;
+  }
+
+  /** Windows: PowerShell downloads via Invoke-WebRequest, then python runs it. */
+  function buildWindowsCommand(info: RelayInfo): string {
+    return `cd $env:TEMP; Invoke-WebRequest -Uri "https://github.com/anomalyco/ai-os/raw/main/scripts/canva-oauth-relay.py" -OutFile "canva-oauth-relay.py"; python canva-oauth-relay.py --port ${info.oauthPort} --server ${info.server} --token ${info.token}`;
   }
 
   return (
@@ -112,7 +181,10 @@ export default function OauthPage() {
               automatically.
             </p>
             <button
-              onClick={start}
+              onClick={() => {
+                start();
+                fetchRelayToken();
+              }}
               className="w-full rounded-lg bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-400"
             >
               OK, start
@@ -128,6 +200,101 @@ export default function OauthPage() {
 
         {phase === "running" && (
           <div className="space-y-4">
+            {/* --- Remote helper instructions (only shown when relay info available) --- */}
+            {relayInfo && (
+              <div className="rounded-lg border border-amber-400/30 bg-amber-400/5 p-4 text-sm">
+                <p className="font-medium text-amber-200">
+                  🖥 Extra step needed
+                </p>
+                <p className="mt-1 text-xs text-amber-100/80">
+                  Canva requires a <strong>small helper script</strong> running on your computer
+                  to catch the authorization callback. Pick your operating system below, copy the
+                  command, and paste it into a terminal. The script downloads itself automatically
+                  — you don&apos;t need to save anything manually.
+                </p>
+
+                {/* --- OS-specific commands --- */}
+                <div className="mt-3 space-y-2">
+                  {/* macOS */}
+                  <details className="group">
+                    <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-amber-100/80 hover:text-amber-100">
+                      🍎 macOS
+                    </summary>
+                    <div className="mt-1 rounded bg-black/50 p-2">
+                      <ol className="list-decimal list-inside space-y-1.5 text-[10px] text-amber-100/70">
+                        <li>
+                          Open <strong>Terminal</strong> (press{" "}
+                          <kbd className="rounded border border-white/20 bg-black/60 px-1">⌘</kbd>
+                          {" + "}
+                          <kbd className="rounded border border-white/20 bg-black/60 px-1">Space</kbd>
+                          , type <code className="bg-black/60 px-1 rounded">Terminal</code>, press Enter)
+                        </li>
+                        <li>
+                          Paste this command and press Enter:
+                          <CommandBlock command={buildUnixCommand(relayInfo)} />
+                        </li>
+                      </ol>
+                    </div>
+                  </details>
+
+                  {/* Windows */}
+                  <details className="group">
+                    <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-amber-100/80 hover:text-amber-100">
+                      🪟 Windows
+                    </summary>
+                    <div className="mt-1 rounded bg-black/50 p-2">
+                      <ol className="list-decimal list-inside space-y-1.5 text-[10px] text-amber-100/70">
+                        <li>
+                          Open <strong>PowerShell</strong> (click Start, type{" "}
+                          <code className="bg-black/60 px-1 rounded">PowerShell</code>, press Enter)
+                        </li>
+                        <li>
+                          Paste this command and press Enter:
+                          <CommandBlock command={buildWindowsCommand(relayInfo)} />
+                        </li>
+                        <li>
+                          If you get an &quot;execution policy&quot; error, run this first:
+                          <CommandBlock command="Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass" />
+                        </li>
+                      </ol>
+                    </div>
+                  </details>
+
+                  {/* Linux */}
+                  <details className="group">
+                    <summary className="flex cursor-pointer items-center gap-1.5 text-[11px] font-medium text-amber-100/80 hover:text-amber-100">
+                      🐧 Linux
+                    </summary>
+                    <div className="mt-1 rounded bg-black/50 p-2">
+                      <ol className="list-decimal list-inside space-y-1.5 text-[10px] text-amber-100/70">
+                        <li>
+                          Open a <strong>terminal</strong> (Ctrl+Alt+T on most distros)
+                        </li>
+                        <li>
+                          Paste this command and press Enter:
+                          <CommandBlock command={buildUnixCommand(relayInfo)} />
+                        </li>
+                      </ol>
+                    </div>
+                  </details>
+                </div>
+
+                {/* --- Next step: authorize --- */}
+                <div className="mt-3 rounded bg-black/30 p-2.5">
+                  <p className="text-xs font-medium text-amber-200">
+                    What happens next
+                  </p>
+                  <p className="mt-1 text-[11px] text-amber-100/70">
+                    The terminal will say <em>&quot;Waiting for Canva OAuth redirect…&quot;</em>.{" "}
+                    Leave it running. Then click <strong>&quot;Open in Browser&quot;</strong> below
+                    to approve at Canva. The helper catches the response automatically — you&apos;ll
+                    see &quot;✓ Canva Authorized&quot; in the terminal, and you can close it.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* --- Authorize URL --- */}
             {authorizeUrl ? (
               <div className="rounded-lg border border-emerald-400/30 bg-emerald-400/5 p-4 text-sm">
                 <p className="font-medium text-emerald-200">Authorize in your browser:</p>
@@ -188,7 +355,10 @@ export default function OauthPage() {
             </p>
             <div className="flex gap-2">
               <button
-                onClick={start}
+                onClick={() => {
+                  start();
+                  fetchRelayToken();
+                }}
                 className="rounded-lg bg-indigo-500 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-400"
               >
                 Try again
