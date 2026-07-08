@@ -28,7 +28,12 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
   const phase = state?.phase ?? "unknown";
   const version = state?.lastUpdated;  // cache-buster: edits bump lastUpdated → images re-fetch
   const hasExports = (state?.exports?.length ?? 0) > 0;
-  const hasDesign = Boolean(state?.design?.design_id || state?.design?.canva_url);
+  // A design exists if the collection-level link is set (deck mode, or posts
+  // mode's slide-0 default) OR any slide carries its own design_id/canva_url
+  // (posts mode: each slide is its own Canva design).
+  const hasDesign =
+    Boolean(state?.design?.design_id || state?.design?.canva_url) ||
+    slides.some((s) => Boolean(s.design_id || s.canva_url));
 
   // Derive the effective selection during render. If the user hasn't picked a
   // slide yet, or their pick no longer exists, fall back to the first slide.
@@ -49,9 +54,10 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
       <StudioToolbar
         title="Carousel Studio"
         phase={phase}
-        hasExports={hasExports}
         hasDesign={hasDesign}
         design={state?.design}
+        slideCanvaUrl={selectedSlide?.canva_url}
+        slideNumber={selectedSlide ? selectedSlide.index + 1 : undefined}
       />
 
       {state?.errors && state.errors.length > 0 && (

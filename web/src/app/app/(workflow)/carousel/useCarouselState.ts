@@ -61,6 +61,7 @@ function parseSlides(raw: unknown, exports: unknown): CarouselSlide[] {
         archetype: asString(s.archetype),
         renderPath: explicit ?? findRender(exportList, index),
         design_id: asString(s.design_id),
+        canva_url: asString(s.canva_url),
       };
     })
     .filter((s): s is CarouselSlide => s !== null);

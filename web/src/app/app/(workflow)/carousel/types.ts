@@ -22,6 +22,8 @@ export interface CarouselSlide {
   renderPath?: string | null;
   /** Per-slide Canva design_id (posts mode: each slide is its own design). */
   design_id?: string;
+  /** Per-slide Canva edit URL (posts mode: "Open slide N in Canva" links here). */
+  canva_url?: string;
 }
 
 /** Top-level brief metadata the canvas surfaces. */

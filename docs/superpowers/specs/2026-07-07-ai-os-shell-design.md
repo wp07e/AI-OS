@@ -156,7 +156,7 @@ The shell renders `<def.Canvas state={def.useState(...)} />` and nothing more. T
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ CAROUSEL STUDIO · Q3 tips                                   │
-│ [Generate] [Export to Canva] [Reset]        ← toolbar       │
+│ [Generate] [Reset]                          ← toolbar       │
 ├─────────────────────────────────────────────────────────────┤
 │ ┌─────────────────────────────────────────┐                 │
 │ │       SELECTED SLIDE (big PNG)          │  ← exports/     │

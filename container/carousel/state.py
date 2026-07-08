@@ -35,12 +35,29 @@ def write_state(
     mode: str | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
-    """Write state.json (overwrites). All optional fields are merged if provided."""
-    state: dict[str, Any] = {
-        "phase": phase,
-        "lastUpdated": _now_iso(),
-        "errors": errors or [],
-    }
+    """Merge state.json with the provided fields (overwrites on field conflicts).
+
+    Existing fields are preserved unless overridden here, so a caller that wants
+    to update only `slides`/`phase` does not silently drop `design`. A field set
+    to ``None`` explicitly clears it. `phase` and `lastUpdated` are always set.
+
+    NOTE: `errors`, when provided, *replaces* the existing list (it is not
+    appended) — use append_error() to add to the list.
+    """
+    # Start from the current on-disk state so omitted fields survive.
+    path = os.path.join(instance_folder, "state.json")
+    state = _read_state(instance_folder)
+
+    state["phase"] = phase
+    state["lastUpdated"] = _now_iso()
+
+    # `errors=None` is ambiguous with "leave alone"; only overwrite when the
+    # caller actually passed a list (mirrors the original semantics).
+    if errors is not None:
+        state["errors"] = errors
+    else:
+        state.setdefault("errors", [])
+
     if mode is not None:
         state["mode"] = mode
     if brief is not None:
@@ -54,11 +71,23 @@ def write_state(
     if extra:
         state.update(extra)
 
-    path = os.path.join(instance_folder, "state.json")
     tmp = path + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f, indent=2)
     os.replace(tmp, path)  # atomic — canvas never reads a half-written file
+
+
+def _read_state(instance_folder: str) -> dict[str, Any]:
+    """Read existing state.json, or return an empty dict if missing/invalid."""
+    path = os.path.join(instance_folder, "state.json")
+    try:
+        with open(path) as f:
+            state = json.load(f)
+        if isinstance(state, dict):
+            return state
+    except (OSError, json.JSONDecodeError):
+        pass
+    return {}
 
 
 def append_error(instance_folder: str, message: str, *, phase: str | None = None) -> None:
@@ -129,6 +158,7 @@ def slide_state(
     archetype: str = "",
     design_id: str = "",
     render_path: str = "",
+    canva_url: str = "",
 ) -> dict[str, Any]:
     """Build a slides[] entry for state.json (matches CarouselSlide in types.ts)."""
     s: dict[str, Any] = {"index": index}
@@ -144,6 +174,8 @@ def slide_state(
         s["design_id"] = design_id
     if render_path:
         s["render_path"] = render_path
+    if canva_url:
+        s["canva_url"] = canva_url
     return s
 
 

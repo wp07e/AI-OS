@@ -10,12 +10,14 @@ interface Props {
   title: string;
   /** Current workflow phase string. */
   phase: string;
-  /** True once exports exist (a design has been exported). */
-  hasExports: boolean;
   /** True once a Canva design_id/url has been captured. */
   hasDesign: boolean;
   /** The Canva design link (rendered via DesignCard). */
   design?: CarouselDesign;
+  /** Per-slide Canva link for the selected slide (posts mode). */
+  slideCanvaUrl?: string;
+  /** 1-indexed slide number, for the "Open slide N in Canva" label. */
+  slideNumber?: number;
 }
 
 /**
@@ -27,16 +29,14 @@ interface Props {
  *
  * Buttons shown adapt to the workflow's progress:
  *  - Generate: before any design exists (kick off the whole pipeline)
- *  - Export to Canva: once a design exists but exports are missing
  *  - Reset: always (with confirm)
  */
-export function StudioToolbar({ title, phase, hasExports, hasDesign, design }: Props) {
+export function StudioToolbar({ title, phase, hasDesign, design, slideCanvaUrl, slideNumber }: Props) {
   const chat = useAgentChatContext();
   const [confirmingReset, setConfirmingReset] = useState(false);
   const busy = chat.busy;
 
   const showGenerate = !hasDesign;
-  const showExport = hasDesign && !hasExports;
 
   return (
     <div className="flex shrink-0 flex-col gap-2 border-b border-white/10 bg-[var(--card)]/30 px-4 py-3">
@@ -47,20 +47,17 @@ export function StudioToolbar({ title, phase, hasExports, hasDesign, design }: P
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <DesignCard canvaUrl={design?.canva_url} />
+          <DesignCard
+            canvaUrl={design?.canva_url}
+            slideCanvaUrl={slideCanvaUrl}
+            slideNumber={slideNumber}
+          />
           {showGenerate && (
             <ToolbarButton
               label={busy ? "Working…" : "Generate"}
               disabled={busy}
               onClick={() => chat.send("Generate a carousel from the current brief.")}
               primary
-            />
-          )}
-          {showExport && (
-            <ToolbarButton
-              label={busy ? "Working…" : "Export to Canva"}
-              disabled={busy}
-              onClick={() => chat.send("Export the carousel to Canva and capture the template.")}
             />
           )}
           {confirmingReset ? (

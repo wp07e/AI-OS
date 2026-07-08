@@ -60,6 +60,7 @@ def run_posts(
     write_state(instance_folder, "generating_design", mode=brief.mode, slides=slides_state)
 
     design_ids: list[str] = []
+    collection_design: dict | None = None
     for i, slide in enumerate(brief.slides):
         query = _build_slide_query(preamble, slide, brief)
         gen = generate_design(client, query=query, design_type=brief.design_type)
@@ -74,15 +75,21 @@ def run_posts(
 
         slides_state[i]["design_id"] = created.design_id
         slides_state[i]["render_path"] = render_path
+        slides_state[i]["canva_url"] = created.edit_url
         design_ids.append(created.design_id)
 
         # Update state after each slide so the filmstrip populates incrementally.
+        # Keep a stable collection-level `design` (slide 0's) so the canvas can
+        # show "Designed in Canva" continuously — the toolbar surfaces the
+        # *selected* slide's own canva_url from slides[] for per-slide links.
+        if i == 0:
+            collection_design = {"design_id": created.design_id, "canva_url": created.edit_url}
         write_state(
             instance_folder,
             "generating_design",
             mode=brief.mode,
             slides=slides_state,
-            design={"design_id": created.design_id, "canva_url": created.edit_url} if i == 0 else None,
+            design=collection_design,
         )
 
     # Capture template.json — the element contract the AI edits against.
