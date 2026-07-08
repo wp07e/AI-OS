@@ -17,6 +17,7 @@ config.json
 web/scripts/seed.ts
 web/scripts/reset.sh
 web/scripts/run.sh
+web/src/lib/db.ts
 
 # ─── macOS ──────────────────────────────────────────────────────────────────
 .DS_Store
