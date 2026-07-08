@@ -15,6 +15,8 @@ container/**/.env
 secrets/
 config.json
 web/scripts/seed.ts
+web/scripts/reset.sh
+web/scripts/run.sh
 
 # ─── macOS ──────────────────────────────────────────────────────────────────
 .DS_Store
