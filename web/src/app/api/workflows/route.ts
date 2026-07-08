@@ -87,19 +87,37 @@ export async function POST(req: Request) {
   // Build the per-instance AGENTS.md content. The heredoc below uses a quoted
   // delimiter ('AGENTSEOF') so no shell expansion happens on the body — safe
   // even if title/folder contain special chars (they're written literally).
-  const agentsMd = `# Active workflow instance
+  const agentsMd = `# Active workflow instance — ${title}
 
-- **Workflow type:** ${def.type}
-- **Title:** ${title}
 - **Instance folder:** ${folder}
+- **Workflow type:** ${def.type}
 - **Skill:** ${def.skill}
 
-You are working on this instance. Read and write all files for this work under:
-\`\`\`
-${folder}
-\`\`\`
-Write state.json, memory.md, and any artifact files (brief.json, exports/, etc.)
-there. See /workspace/AGENTS.md for the full environment context.
+## STOP — read this before doing anything
+
+For ANY request related to this instance, you MUST follow the skill procedure.
+Do NOT call Canva tools directly. The skill lives at:
+
+    /workspace/skills/${def.skill}/SKILL.md
+
+Read that file now, then follow its steps exactly. It tells you precisely what
+to do — including the exact commands to run and the exact file format to write.
+
+The ${def.skill} workflow uses a **deterministic script** for generation. Your
+job is to (1) parse the user's request, (2) write brief.json in the format the
+skill specifies, (3) run the script the skill names, (4) report the outcome.
+You do NOT call generate-design, create-design-from-candidate, or export-design
+yourself — the script does. Calling them yourself is the failure mode this
+procedure exists to prevent.
+
+## Working directory
+
+All files for this instance go under:
+    ${folder}
+
+Write brief.json, state.json, memory.md, exports/, etc. there. Never write to
+/tmp, /app, or /workspace root. See /workspace/AGENTS.md for the full
+environment context (workspace rules, state.json contract, memory.md format).
 `;
   // Write via a quoted heredoc so the body is passed literally (no expansion).
   // folder is a uuid-based path under /workspace — safe for single-quoting.

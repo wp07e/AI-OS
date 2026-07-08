@@ -84,18 +84,16 @@ export async function POST(req: Request) {
   }
   log("instance resolved", { type: instance.workflow_type, folder: instance.folder });
 
-  // Build the one-time session prime from the workflow registry. The prime is
-  // sent ONLY when a new session is created (inside getOrCreateSession); on a
-  // cache hit it's a no-op. The user's actual message is still forwarded CLEAN
-  // — no per-message injection — so the earlier anti-pattern (path injection on
-  // every message triggering slow tool loops) is avoided. The prime orients the
-  // agent once, then real messages go through unmodified.
+  // Build the one-time session prime. Sent ONLY when a new session is created
+  // (inside getOrCreateSession); no-op on a cache hit. The prime tells the agent
+  // its concrete folder AND — critically — to read the skill file before acting.
+  // Without it the agent sees "carousel" + Canva tools and shortcuts to calling
+  // them directly, ignoring the deterministic procedure. The user's real message
+  // is still forwarded CLEAN (no per-message injection).
   const def = getWorkflow(instance.workflow_type);
   const prime: SessionPrime = {
     folder: instance.folder,
     skill: def?.skill ?? instance.workflow_type,
-    label: def?.label ?? instance.workflow_type,
-    instructions: def?.sessionPrompt,
   };
 
   const encoder = new TextEncoder();
@@ -123,8 +121,8 @@ export async function POST(req: Request) {
         let sessionId: string;
         try {
           // Prime only on the first (new-session) call. The retry below omits
-          // it: if we're here via the 404 path, the session was already primed
-          // on the first attempt and re-priming would duplicate the grounding.
+          // it: a 404-retry means the session was already primed on the first
+          // attempt; re-priming would duplicate the grounding.
           sessionId = await getOrCreateSession(row, workflowInstanceId, prime);
           log("getOrCreateSession — done", { sessionId });
           await drivePrompt(row, sessionId, message, send, abort.signal, /*attempt*/ 1);
@@ -209,9 +207,21 @@ async function drivePrompt(
   }
 
   // Wait until the event handler flips `idle` (session.idle) or the signal aborts.
+  // While waiting, send periodic heartbeat events down the SSE stream. This keeps
+  // data flowing so the connection isn't dropped by an idle-timeout at any proxy
+  // layer, and keeps the client's typing indicator alive during long generations
+  // (the deterministic carousel script can run 3-4 minutes with no OpenCode events).
   const deadline = Date.now() + 600_000;
+  let lastBeat = Date.now();
   while (!idle && !signal.aborted && Date.now() < deadline) {
     await sleep(200);
+    if (!idle && Date.now() - lastBeat >= 5_000) {
+      lastBeat = Date.now();
+      // Emit as a tool frame so the client's typing indicator + thinking panel
+      // stay alive without scrolling the chat or producing visible "tool" text.
+      // status "running" keeps the existing "working…" affordance going.
+      send({ type: "tool", title: "Working", status: "running" });
+    }
   }
 
   // After idle: fetch authoritative final text and emit done. Guards against

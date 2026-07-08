@@ -13,13 +13,15 @@ interface Props {
   phase: string;
   /** Select a slide. */
   onSelect: (index: number) => void;
+  /** Bumped whenever state.json changes — cache-buster so edited thumbnails refresh. */
+  version?: string;
 }
 
 /**
  * Thumbnail row. Click selects. Numbers slides 1-based; highlights the selected
  * slide; pulses the slide currently being generated when the agent is mid-export.
  */
-export function Filmstrip({ instanceId, slides, selectedIndex, phase, onSelect }: Props) {
+export function Filmstrip({ instanceId, slides, selectedIndex, phase, onSelect, version }: Props) {
   if (slides.length === 0) {
     return (
       <div className="flex items-center justify-center px-4 py-6 text-xs text-[var(--muted)]">
@@ -50,7 +52,7 @@ export function Filmstrip({ instanceId, slides, selectedIndex, phase, onSelect }
             {slide.renderPath ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={`/api/workspace/${instanceId}/file/${slide.renderPath}`}
+                src={`/api/workspace/${instanceId}/file/${slide.renderPath}${version ? `?v=${version}` : ""}`}
                 alt={`Slide ${slide.index + 1}`}
                 className="absolute inset-0 h-full w-full object-cover"
               />

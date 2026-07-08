@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import type { CanvasProps } from "@/lib/workflows/types";
+import { CandidateStrip } from "./CandidateStrip";
 import { Filmstrip } from "./Filmstrip";
 import { SlideCopyPanel } from "./SlideCopyPanel";
 import { SlidePreview } from "./SlidePreview";
@@ -25,6 +26,7 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
 
   const slides = useMemo(() => state?.slides ?? [], [state?.slides]);
   const phase = state?.phase ?? "unknown";
+  const version = state?.lastUpdated;  // cache-buster: edits bump lastUpdated → images re-fetch
   const hasExports = (state?.exports?.length ?? 0) > 0;
   const hasDesign = Boolean(state?.design?.design_id || state?.design?.canva_url);
 
@@ -39,6 +41,8 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
   }
 
   const selectedSlide = slides.find((s) => s.index === effectiveSelected) ?? null;
+  const candidates = state?.candidates;
+  const isAwaitingSelection = phase === "awaiting_candidate_selection";
 
   return (
     <div className="flex h-full flex-col">
@@ -56,26 +60,47 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
         </div>
       )}
 
-      {/* Preview + copy panel */}
-      <div className="grid min-h-0 flex-1 grid-cols-[1fr_280px]">
-        <div className="min-h-0 min-w-0 p-4">
-          <SlidePreview instanceId={instanceId} slide={selectedSlide} phase={phase} />
+      {/* Candidate selection (deck mode pause) — replaces the preview area. */}
+      {isAwaitingSelection && candidates && candidates.length > 0 ? (
+        <div className="flex min-h-0 flex-1 items-center overflow-y-auto border-b border-white/10">
+          <CandidateStrip
+            instanceId={instanceId}
+            candidates={candidates}
+            interactive={true}
+          />
         </div>
-        <aside className="min-h-0 overflow-y-auto border-l border-white/10 bg-[var(--card)]/20">
-          <SlideCopyPanel slide={selectedSlide} />
-        </aside>
-      </div>
+      ) : candidates && candidates.length > 0 && !hasExports ? (
+        /* Informational candidate strip during generation (before exports land). */
+        <div className="shrink-0 border-b border-white/10">
+          <CandidateStrip instanceId={instanceId} candidates={candidates} interactive={false} />
+        </div>
+      ) : null}
 
-      {/* Filmstrip */}
-      <div className="shrink-0 border-t border-white/10 bg-[var(--card)]/20">
-        <Filmstrip
-          instanceId={instanceId}
-          slides={slides}
-          selectedIndex={selected}
-          phase={phase}
-          onSelect={setSelected}
-        />
-      </div>
+      {/* Preview + copy panel — hidden while the deck-selection strip is shown. */}
+      {!(isAwaitingSelection && candidates && candidates.length > 0) && (
+        <div className="grid min-h-0 flex-1 grid-cols-[1fr_280px]">
+          <div className="min-h-0 min-w-0 p-4">
+            <SlidePreview instanceId={instanceId} slide={selectedSlide} phase={phase} version={version} />
+          </div>
+          <aside className="min-h-0 overflow-y-auto border-l border-white/10 bg-[var(--card)]/20">
+            <SlideCopyPanel slide={selectedSlide} />
+          </aside>
+        </div>
+      )}
+
+      {/* Filmstrip — hidden during deck selection (no slides to show yet). */}
+      {!isAwaitingSelection && (
+        <div className="shrink-0 border-t border-white/10 bg-[var(--card)]/20">
+          <Filmstrip
+            instanceId={instanceId}
+            slides={slides}
+            selectedIndex={selected}
+            phase={phase}
+            onSelect={setSelected}
+            version={version}
+          />
+        </div>
+      )}
     </div>
   );
 }

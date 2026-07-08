@@ -47,7 +47,7 @@ export function StudioToolbar({ title, phase, hasExports, hasDesign, design }: P
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <DesignCard design={design} />
+          <DesignCard canvaUrl={design?.canva_url} />
           {showGenerate && (
             <ToolbarButton
               label={busy ? "Working…" : "Generate"}

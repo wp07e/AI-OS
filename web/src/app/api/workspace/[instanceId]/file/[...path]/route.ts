@@ -54,9 +54,11 @@ export async function GET(
     headers: {
       "Content-Type": contentType,
       "Content-Length": String(buf.length),
-      // Allow the browser to cache immutable exports; state.json is fetched via
-      // the /state endpoint, not here, so caching is safe for rendered files.
-      "Cache-Control": "public, max-age=60",
+      // Exports are MUTABLE — edits overwrite them. The canvas appends a
+      // cache-buster (?v=<lastUpdated>) so re-fetches happen when the file
+      // changes, but we must not tell the browser to serve stale bytes across
+      // that change. no-cache → revalidate on every request.
+      "Cache-Control": "no-cache",
     },
   });
 }

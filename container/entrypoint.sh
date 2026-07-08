@@ -41,20 +41,26 @@ if ! id -u "${APP_USER}" >/dev/null 2>&1; then
   fi
 fi
 
-# Seed the workspace with image defaults if the mounted volume is empty.
-# Lets a fresh user `opencode` straight into a working config + skills without
-# a separate init step. Existing files are never overwritten.
+# Sync image-authored defaults into the workspace on EVERY start (not just the
+# first), so skill/procedure/config updates ship in new images and reach the
+# running agent. These are image artifacts, not user data — user data lives
+# under /workspace/carousels/<instance>/ (workflow output), which we never touch
+# here. We force-overwrite the canonical files; if a user has deliberately
+# edited one it will be reset on next boot (acceptable: the image is the source
+# of truth for skills/config/environment context).
 shopt -s dotglob nullglob
-if [ -z "$(ls -A "${WORKSPACE_DIR}" 2>/dev/null || true)" ]; then
-  echo "[entrypoint] initializing empty workspace at ${WORKSPACE_DIR}"
-  cp -f -R "${APP_DIR}/opencode.jsonc" "${WORKSPACE_DIR}/" 2>/dev/null || true
-  # AGENTS.md is the agent's permanent environment context (where /workspace is,
-  # how instances + state.json + memory.md work). Always copy so the agent knows
-  # its operating environment from the first session.
-  cp -f -R "${APP_DIR}/AGENTS.md" "${WORKSPACE_DIR}/" 2>/dev/null || true
-  [ -d "${APP_DIR}/skills" ]   && cp -n -R "${APP_DIR}/skills"   "${WORKSPACE_DIR}/" 2>/dev/null || true
-  [ -d "${APP_DIR}/fixtures" ] && cp -n -R "${APP_DIR}/fixtures" "${WORKSPACE_DIR}/" 2>/dev/null || true
-fi
+echo "[entrypoint] syncing image defaults into ${WORKSPACE_DIR}"
+cp -f -R "${APP_DIR}/opencode.jsonc" "${WORKSPACE_DIR}/" 2>/dev/null || true
+# AGENTS.md is the agent's permanent environment context (where /workspace is,
+# how instances + state.json + memory.md work). Always copy so the agent knows
+# its operating environment.
+cp -f -R "${APP_DIR}/AGENTS.md" "${WORKSPACE_DIR}/" 2>/dev/null || true
+# Skills + fixtures: force-overwrite so updated procedures (e.g. the
+# deterministic carousel pipeline) propagate to running containers. These are
+# read-only procedures, not user data.
+mkdir -p "${WORKSPACE_DIR}/skills" "${WORKSPACE_DIR}/fixtures" 2>/dev/null || true
+[ -d "${APP_DIR}/skills" ]   && cp -f -R "${APP_DIR}/skills/."   "${WORKSPACE_DIR}/skills/" 2>/dev/null || true
+[ -d "${APP_DIR}/fixtures" ] && cp -f -R "${APP_DIR}/fixtures/." "${WORKSPACE_DIR}/fixtures/" 2>/dev/null || true
 
 # Fix ownership of the mounted volume so the non-root user can write to it.
 # Deliberately scoped to the workspace — never chown the image's /app.

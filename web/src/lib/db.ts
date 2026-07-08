@@ -18,6 +18,7 @@ export function db(): Database.Database {
 
   migrate(conn);
   migrateLegacyOpencodeSessions(conn);
+  migrateOpencodeSessionsContainerId(conn);
   _db = conn;
   return conn;
 }
@@ -76,12 +77,21 @@ function migrate(conn: Database.Database) {
       workflow_instance_id TEXT    NOT NULL,
       session_id           TEXT    NOT NULL,
       opencode_port        INTEGER NOT NULL,
+      container_id         TEXT,   -- the container the session lives in; a recreate changes this even though the port doesn't, invalidating stale sessions
       created_at           INTEGER NOT NULL,
       PRIMARY KEY (user_id, workflow_instance_id),
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY(workflow_instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
     );
   `);
+}
+
+// Add container_id to pre-existing opencode_sessions tables (idempotent).
+export function migrateOpencodeSessionsContainerId(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(opencode_sessions)").all() as Array<{ name: string }>;
+  if (!cols.some((c) => c.name === "container_id")) {
+    conn.exec("ALTER TABLE opencode_sessions ADD COLUMN container_id TEXT");
+  }
 }
 
 // ─── Legacy schema migration ────────────────────────────────────────────────

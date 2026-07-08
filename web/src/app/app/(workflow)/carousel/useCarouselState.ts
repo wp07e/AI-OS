@@ -1,7 +1,7 @@
 "use client";
 
 import { useWorkspaceState } from "@/lib/hooks/useWorkspaceState";
-import type { CarouselState, CarouselSlide } from "./types";
+import type { CarouselCandidate, CarouselState, CarouselSlide } from "./types";
 
 /**
  * Carousel Studio state observer. Wraps the generic focus-aware poller with a
@@ -29,9 +29,11 @@ export function useCarouselState(instanceId: string, folder: string) {
         phase: raw.phase,
         lastUpdated: raw.lastUpdated,
         errors: raw.errors ?? [],
+        mode: parseMode(raw.mode),
         brief: parseBrief(raw.brief),
         slides,
         design: parseDesign(raw.design),
+        candidates: parseCandidates(raw.candidates),
         files: raw.files ?? {},
         exports: raw.exports ?? [],
       };
@@ -39,7 +41,8 @@ export function useCarouselState(instanceId: string, folder: string) {
   });
 }
 
-/** Coerce an unknown value into a slides array, joining render paths from exports. */
+/** Coerce an unknown value into a slides array. Uses the script's explicit
+ *  render_path when present; otherwise joins from the exports[] list. */
 function parseSlides(raw: unknown, exports: unknown): CarouselSlide[] {
   if (!Array.isArray(raw)) return [];
   const exportList = Array.isArray(exports) ? (exports as string[]) : [];
@@ -48,13 +51,16 @@ function parseSlides(raw: unknown, exports: unknown): CarouselSlide[] {
       if (!entry || typeof entry !== "object") return null;
       const s = entry as Record<string, unknown>;
       const index = typeof s.index === "number" ? s.index : i;
+      // The pipeline writes render_path (snake_case); accept renderPath too.
+      const explicit = asString(s.render_path) ?? asString(s.renderPath);
       return {
         index,
         headline: asString(s.headline),
         body: asString(s.body),
         cta: asString(s.cta),
         archetype: asString(s.archetype),
-        renderPath: findRender(exportList, index),
+        renderPath: explicit ?? findRender(exportList, index),
+        design_id: asString(s.design_id),
       };
     })
     .filter((s): s is CarouselSlide => s !== null);
@@ -70,6 +76,10 @@ function findRender(exports: string[], slideIndex: number): string | null {
   return loose ?? null;
 }
 
+function parseMode(raw: unknown): "posts" | "deck" | undefined {
+  return raw === "posts" || raw === "deck" ? raw : undefined;
+}
+
 function parseBrief(raw: unknown): CarouselState["brief"] {
   if (!raw || typeof raw !== "object") return undefined;
   const b = raw as Record<string, unknown>;
@@ -77,6 +87,7 @@ function parseBrief(raw: unknown): CarouselState["brief"] {
     topic: asString(b.topic),
     aspect_ratio: asString(b.aspect_ratio),
     slide_count: typeof b.slide_count === "number" ? b.slide_count : undefined,
+    platform: asString(b.platform),
   };
 }
 
@@ -88,6 +99,26 @@ function parseDesign(raw: unknown): CarouselState["design"] {
     design_id: asString(d.design_id),
     canva_url: asString(d.canva_url),
   };
+}
+
+function parseCandidates(raw: unknown): CarouselCandidate[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const list = raw
+    .map((entry): CarouselCandidate | null => {
+      if (!entry || typeof entry !== "object") return null;
+      const c = entry as Record<string, unknown>;
+      const id = asString(c.id) ?? asString(c.candidate_id);
+      if (!id) return null;
+      return {
+        id,
+        url: asString(c.url),
+        thumbnailUrl: asString(c.thumbnailUrl) ?? asString(c.thumbnail_url),
+        slideCount: typeof c.slideCount === "number" ? c.slideCount : (typeof c.slide_count === "number" ? c.slide_count : undefined),
+        selected: c.selected === true,
+      };
+    })
+    .filter((c): c is CarouselCandidate => c !== null);
+  return list.length > 0 ? list : undefined;
 }
 
 function asString(v: unknown): string | undefined {

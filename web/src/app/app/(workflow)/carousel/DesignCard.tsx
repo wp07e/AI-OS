@@ -1,23 +1,31 @@
 "use client";
 
-import type { CarouselDesign } from "./types";
-
 interface Props {
-  /** Canva design link, if a design has been generated. */
-  design?: CarouselDesign;
+  /** Deck-level Canva link (deck mode, or posts mode's first design). Optional. */
+  canvaUrl?: string;
+  /** Per-slide Canva link (posts mode: the selected slide's own design). Optional. */
+  slideCanvaUrl?: string;
+  /** Which slide the per-slide link opens (1-indexed, for the label). */
+  slideNumber?: number;
 }
 
 /**
- * "Designed in Canva" link card. Shows once the agent has generated a design
- * (Phase 3). The Open-in-Canva anchor opens the design in a new tab — it is not
- * a chat action; everything else (edits, re-exports) goes through the agent.
+ * "Designed in Canva" link card. Dual-mode:
+ * - Posts mode: each slide has its own design → "Open slide N in Canva"
+ * - Deck mode: one deck → "Open in Canva"
+ * Renders nothing if no URL is available yet.
  */
-export function DesignCard({ design }: Props) {
-  if (!design?.canva_url) return null;
+export function DesignCard({ canvaUrl, slideCanvaUrl, slideNumber }: Props) {
+  const url = slideCanvaUrl ?? canvaUrl;
+  if (!url) return null;
+
+  const label = slideCanvaUrl
+    ? `Open slide ${slideNumber ?? ""} in Canva`
+    : "Designed in Canva";
 
   return (
     <a
-      href={design.canva_url}
+      href={url}
       target="_blank"
       rel="noopener noreferrer"
       className="group inline-flex items-center gap-2 rounded-lg border border-emerald-400/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-200 transition hover:border-emerald-400/60 hover:bg-emerald-500/15"
@@ -35,8 +43,8 @@ export function DesignCard({ design }: Props) {
       >
         <path d="M20 6L9 17l-5-5" />
       </svg>
-      Designed in Canva
-      <span className="text-emerald-300/70 transition group-hover:text-emerald-200">Open in Canva ↗</span>
+      {label}
+      <span className="text-emerald-300/70 transition group-hover:text-emerald-200">↗</span>
     </a>
   );
 }

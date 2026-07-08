@@ -85,6 +85,11 @@ COPY opencode.jsonc ${APP_DIR}/opencode.jsonc
 COPY AGENTS.md      ${APP_DIR}/AGENTS.md
 COPY skills/        ${APP_DIR}/skills/
 COPY fixtures/      ${APP_DIR}/fixtures/
+# Deterministic carousel pipeline (drives the Canva MCP directly over HTTPS,
+# bypassing opencode for generation). The agent runs these scripts instead of
+# calling Canva generation tools itself — eliminates model-to-model variance.
+# run.py is invoked as: uv run python /app/carousel/run.py <instance_folder>
+COPY carousel/      ${APP_DIR}/carousel/
 
 # ─── Grok MCP ──────────────────────────────────────────────────────────────
 # Bundled Python MCP server (xAI Grok). Source lives in the image at

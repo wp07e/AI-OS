@@ -9,6 +9,9 @@ interface Props {
   slide: CarouselSlide | null;
   /** Current workflow phase — shapes the placeholder copy. */
   phase: string;
+  /** Bumped whenever state.json changes — used as a cache-buster so edited
+   *  PNGs re-fetch instead of showing the stale cached version. */
+  version?: string;
 }
 
 /**
@@ -16,7 +19,7 @@ interface Props {
  * endpoint. While no render exists yet (the agent hasn't exported, or this
  * slide hasn't been generated), shows a phase-aware placeholder.
  */
-export function SlidePreview({ instanceId, slide, phase }: Props) {
+export function SlidePreview({ instanceId, slide, phase, version }: Props) {
   if (!slide) {
     return (
       <Placeholder text="No slide selected" hint="Pick a slide from the filmstrip below." working={false} />
@@ -38,7 +41,7 @@ export function SlidePreview({ instanceId, slide, phase }: Props) {
     <div className="flex h-full w-full items-center justify-center">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={`/api/workspace/${instanceId}/file/${slide.renderPath}`}
+        src={`/api/workspace/${instanceId}/file/${slide.renderPath}${version ? `?v=${version}` : ""}`}
         alt={`Slide ${slide.index + 1}`}
         className="max-h-full max-w-full rounded-xl border border-white/10 object-contain shadow-2xl shadow-black/40"
       />

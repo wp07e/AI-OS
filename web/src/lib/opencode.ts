@@ -249,24 +249,21 @@ export function extractAssistantText(res: OpencodeMessageResponse): string {
 //
 // One OpenCode process per user container serves many sessions on a single
 // port. Each workflow instance (lane) gets its own opencode session id, cached
-// here so multi-turn conversations persist across requests. The cache is
-// mirrored on opencode_port so a container relaunch (new port) invalidates it.
+// here so multi-turn conversations persist across requests.
 //
-// PRIMING: when a session is created (cache miss), one grounding message is
-// sent SYNCHRONOUSLY before this function returns — telling the agent its
-// concrete instance folder, its skill, and that it must operate autonomously
-// end-to-end. This is distinct from the earlier anti-pattern (fire-and-forget
-// primes that raced the real message): the prime completes here, then the
-// caller's user message is sent into an already-grounded session. Without this,
-// a reasoning model freelances — it has no reliable signal pointing it at the
-// right folder (a fresh instance has no state.json for file-based discovery to
-// find), and clean user messages carry no path/skill context.
+// INVALIDATION: a cached session is reused only if BOTH the port AND the
+// container_id match. The port alone is insufficient — `docker compose up
+// --force-recreate` and `restart` reuse the same published ports but spawn a
+// fresh opencode process with an EMPTY session list. Comparing container_id
+// (which changes on every recreate) catches this and forces a new session,
+// avoiding 404 "Session not found" errors from a stale cache.
 
 interface CachedSession {
   user_id: number;
   workflow_instance_id: string;
   session_id: string;
   opencode_port: number;
+  container_id: string | null;
 }
 
 /** Grounding payload sent as the first (priming) message on session creation. */
@@ -275,18 +272,25 @@ export interface SessionPrime {
   folder: string;
   /** OpenCode skill name, e.g. "canva-carousel". */
   skill: string;
-  /** Workflow label, e.g. "Carousel Studio". */
-  label: string;
-  /** Optional extra instructions from the workflow's sessionPrompt. */
-  instructions?: string;
 }
 
 /**
  * Returns a usable opencode session id for the given workflow instance, creating
- * + caching one if needed. Reuses the cached session only if it's on the same
- * port (i.e. the same container). When creating a NEW session, sends one
- * grounding prime message (synchronously) so the agent starts oriented to its
- * instance folder + skill before the user's first real message arrives.
+ * + caching one if needed. Reuses the cached session only if the container
+ * hasn't changed (same port AND same container_id).
+ *
+ * PRIME: when a session is created (cache miss), one grounding message is sent
+ * synchronously before this function returns. It tells the agent its concrete
+ * instance folder and — critically — instructs it to READ THE SKILL FILE before
+ * doing anything. Without this, a reasoning model sees "carousel" + available
+ * Canva tools and shortcuts straight to calling them, ignoring the deterministic
+ * procedure. The prime is a separate opencode message whose response is
+ * discarded; the user's real message then lands in an already-grounded session.
+ *
+ * Earlier the prime appeared to "leak into chat" / cause "session error" — that
+ * was actually the missing-OPENAI_API-key bug (401 on every call), not the prime.
+ * With auth restored the prime runs cleanly and its output never reaches the
+ * browser (only the user's subsequent streamed message does).
  */
 export async function getOrCreateSession(
   row: ContainerRow,
@@ -297,30 +301,32 @@ export async function getOrCreateSession(
     .prepare("SELECT * FROM opencode_sessions WHERE user_id = ? AND workflow_instance_id = ?")
     .get(row.user_id, workflowInstanceId) as CachedSession | undefined;
 
-  if (cached && cached.opencode_port === row.opencode_port) {
+  // Reuse only if the container is unchanged. A recreated container has the
+  // same port but a different container_id and a fresh (empty) session list.
+  if (cached && cached.opencode_port === row.opencode_port && cached.container_id === row.container_id) {
     return cached.session_id;
   }
 
   const sessionId = await createSession(row.opencode_port);
   db()
     .prepare(
-      `INSERT INTO opencode_sessions (user_id, workflow_instance_id, session_id, opencode_port, created_at)
-       VALUES (?, ?, ?, ?, ?)
+      `INSERT INTO opencode_sessions (user_id, workflow_instance_id, session_id, opencode_port, container_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(user_id, workflow_instance_id) DO UPDATE SET
          session_id = excluded.session_id,
          opencode_port = excluded.opencode_port,
+         container_id = excluded.container_id,
          created_at = excluded.created_at`,
     )
-    .run(row.user_id, workflowInstanceId, sessionId, row.opencode_port, Date.now());
+    .run(row.user_id, workflowInstanceId, sessionId, row.opencode_port, row.container_id, Date.now());
 
-  // Prime only on fresh creation — never on cache hits or after a 404 retry
-  // (the retry path already has a grounded session from the first attempt).
+  // Prime only on fresh session creation — never on cache hits or 404 retries.
+  // This grounds the agent: tells it its folder AND to read the skill file
+  // before doing anything. The response is discarded; it just orients the
+  // agent so the user's first real message lands in a grounded session.
   if (prime) {
     const text = buildPrimeMessage(prime);
-    console.log(`[opencode] priming session ${sessionId} for ${prime.folder}`);
-    // Blocking send — completes before we return, so the user's first message
-    // lands in a grounded session. The prime response is discarded; it just
-    // needs to orient the agent, not produce anything user-facing.
+    console.log(`[opencode] priming session ${sessionId} for ${prime.folder} (skill: ${prime.skill})`);
     try {
       await sendMessage(row.opencode_port, sessionId, text);
     } catch (err) {
@@ -333,18 +339,29 @@ export async function getOrCreateSession(
   return sessionId;
 }
 
-/** Builds the one-time grounding message sent at session creation. */
+/**
+ * Builds the one-time grounding message. The key instruction: READ THE SKILL
+ * FILE before acting. Without this, the agent sees "carousel" + Canva tools and
+ * shortcuts to calling them directly, ignoring the deterministic procedure.
+ */
 function buildPrimeMessage(prime: SessionPrime): string {
   return [
-    `You are now working in the ${prime.label} workflow.`,
-    `Your active instance folder is ${prime.folder}. Read ${prime.folder}/AGENTS.md now — it names this instance concretely.`,
-    `All files you read or write for this work go under ${prime.folder}. Do not write anywhere else.`,
-    `Load the "${prime.skill}" skill and follow its procedure exactly and completely — do not stop partway to ask the user questions. You are running in autonomous mode (no interactive terminal), so operate end-to-end: parse input, run every phase, write every artifact, and report when done.`,
-    `At each phase boundary, update ${prime.folder}/state.json (overwrite it) with {"phase": "<current>", "lastUpdated": "<ISO>", "errors": []} plus the workflow fields the canvas reads. When you finish or pause, append a handoff note to ${prime.folder}/memory.md.`,
-    prime.instructions ? prime.instructions : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+    `You are now working in an instance of the ${prime.skill} workflow.`,
+    ``,
+    `Your instance folder is ${prime.folder}.`,
+    ``,
+    `BEFORE doing anything else, read these two files:`,
+    `  1. ${prime.folder}/AGENTS.md  — names this instance concretely.`,
+    `  2. /workspace/skills/${prime.skill}/SKILL.md  — the procedure you MUST follow.`,
+    ``,
+    `Follow the SKILL.md procedure exactly. For generation, it tells you to write`,
+    `brief.json and run a deterministic script — do NOT call Canva generation tools`,
+    `(generate-design, create-design-from-candidate, export-design) yourself; the`,
+    `script owns those. You are in autonomous mode (no interactive terminal), so`,
+    `operate end-to-end without stopping to ask the user questions.`,
+    ``,
+    `Acknowledge briefly, then wait for the user's request.`,
+  ].join("\n");
 }
 
 /** Clears the cached session for a workflow instance (e.g. if the server rejects it). */
