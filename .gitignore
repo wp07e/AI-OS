@@ -120,3 +120,5 @@ docker-data/
 # ─── Local-only folders ────────────────────────────────────────────────────
 local/
 /data/
+.zcode/
+deploy/
