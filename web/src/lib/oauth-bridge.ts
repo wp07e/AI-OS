@@ -1,9 +1,12 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
+import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { COMPOSE_FILE } from "./docker";
 import type { ContainerRow } from "./db";
 
 const AUTHORIZE_URL_RE = /https:\/\/mcp\.canva\.com\/authorize\?[^\s|]+/;
+
+/** Path to the OAuth token cache inside the container (appuser's HOME). */
+const MCP_AUTH_TOKEN_PATH = "/workspace/.local/share/opencode/mcp-auth.json";
 
 export type OauthEvent =
   | { type: "log"; line: string }
@@ -17,6 +20,13 @@ export type OauthEvent =
  * parsed. The browser opens the authorize URL; the redirect hits the published
  * OAuth port and OpenCode completes the flow.
  *
+ * Before spawning mcp-auth, any existing token cache file is deleted. This
+ * prevents `opencode mcp auth` from showing an interactive TUI
+ * "Canva already has valid credentials. Re-authenticate?" prompt, which hangs
+ * forever because stdio is piped (no TTY). We only reach this code path when
+ * the connection is confirmed NOT working (Layers 1 and 2 short-circuit if it
+ * is), so deleting a stale token loses nothing.
+ *
  * The optional signal lets the caller cancel mid-flight.
  */
 export function startOauthFlow(
@@ -25,6 +35,36 @@ export function startOauthFlow(
   signal?: AbortSignal,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    // --- Delete any stale token cache so mcp-auth runs a clean flow --------
+    // If mcp-auth.json exists (even with an expired token), opencode shows an
+    // unanswerable "Re-authenticate?" TUI prompt. Removing it forces a fresh
+    // flow. This is safe: Layers 1+2 already confirmed the connection isn't
+    // working, so there's nothing useful in the file to preserve.
+    const rm = spawnSync(
+      "docker",
+      [
+        "compose",
+        "-p",
+        row.project_name,
+        "-f",
+        COMPOSE_FILE,
+        "exec",
+        "--user",
+        "2000:2000",
+        "ai-os",
+        "rm",
+        "-f",
+        MCP_AUTH_TOKEN_PATH,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 },
+    );
+    if (rm.status !== 0) {
+      // Non-fatal: the file may simply not exist (first-time OAuth).
+      // Log but continue — the flow should still work.
+      const stderr = rm.stderr?.toString().trim();
+      if (stderr) emit({ type: "log", line: `[cleanup] rm note: ${stderr}` });
+    }
+
     let proc: ChildProcessByStdio<null, Readable, Readable>;
     try {
       // Run mcp-auth AS THE APPUSER (uid 2000, HOME=/workspace) — not as root.

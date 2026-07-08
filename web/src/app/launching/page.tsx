@@ -85,15 +85,19 @@ export default function LaunchingPage() {
             cache: "no-store",
             signal: controller.signal,
           });
-          const data = await res.json().catch(() => ({})) as { status?: string; error?: string };
+          const data = await res.json().catch(() => ({})) as { status?: string; error?: string; canvaConnected?: boolean };
           console.log(`[launch] poll #${pollNum}:`, res.status, data);
           consecutiveFailures = 0;
 
           if (data.status === "ready") {
-            console.log("[launch] ready! redirecting to /oauth");
+            // If Canva is already connected (e.g. returning user with a valid
+            // token from a previous session), skip the OAuth page entirely and
+            // go straight to the app. Otherwise route through /oauth.
+            const dest = data.canvaConnected ? "/app" : "/oauth";
+            console.log(`[launch] ready! canvaConnected=${data.canvaConnected} → ${dest}`);
             if (!cancelled) {
               setStatus("ready");
-              setTimeout(() => routerRef.current.replace("/oauth"), 700);
+              setTimeout(() => routerRef.current.replace(dest), 700);
             }
             return;
           }
