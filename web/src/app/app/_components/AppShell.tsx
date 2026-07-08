@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AgentPanel } from "./AgentPanel";
 import { WorkRail } from "./WorkRail";
+import { PhasePill } from "./PhasePill";
 import { getWorkflow } from "@/lib/workflows/registry";
 import type { WorkflowState } from "@/lib/workflows/types";
 import { useAgentChat } from "@/lib/hooks/useAgentChat";
@@ -83,7 +84,7 @@ export function AppShell() {
         />
 
         <section className="flex min-w-0 flex-col overflow-hidden border-x border-white/10">
-          {active ? <WorkflowCanvas instance={active} /> : <EmptyCanvas />}
+          {active ? <CanvasArea instance={active} /> : <EmptyCanvas />}
         </section>
 
         <AgentPanel
@@ -97,19 +98,95 @@ export function AppShell() {
 
 /**
  * Renders the active workflow's Canvas component with state from its useState
- * hook. Kept as its own component so the hook calls follow the Rules of Hooks
- * unconditionally per active instance (the canvas mounts/unmounts as the user
- * switches lanes, which correctly resets polling + state).
+ * hook, plus a shell chrome sub-header (instance title + phase pill) and
+ * loading/error states. Kept as its own component so the hook calls follow the
+ * Rules of Hooks unconditionally per active instance (the canvas mounts/unmounts
+ * as the user switches lanes, which correctly resets polling + state).
  */
-function WorkflowCanvas({ instance }: { instance: WorkflowInstance }) {
+function CanvasArea({ instance }: { instance: WorkflowInstance }) {
   const def = getWorkflow(instance.workflow_type);
   if (!def) {
     return <UnknownWorkflow type={instance.workflow_type} />;
   }
 
-  const Canvas = def.Canvas;
   const result = def.useState(instance.id, instance.folder);
-  return <Canvas instanceId={instance.id} folder={instance.folder} state={result.state as WorkflowState} />;
+
+  // Loading: first poll hasn't completed yet. Show a skeleton instead of
+  // passing null state to the canvas (which would render an empty-looking
+  // studio). Once we have any state — even a stale one — we render the canvas;
+  // it handles partial/missing fields gracefully via ?? defaults.
+  if (result.isLoading && !result.state) {
+    return <LoadingSkeleton label={def.label} title={instance.title} />;
+  }
+
+  // Error with no state to fall back on: show a retry UI. If we have a prior
+  // good state, keep showing it (the hook retains last-good state on error).
+  if (result.error && !result.state) {
+    return <CanvasError error={result.error} onRetry={result.refresh} title={instance.title} />;
+  }
+
+  const Canvas = def.Canvas;
+  const phase = (result.state as WorkflowState | null)?.phase ?? "unknown";
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Shell chrome sub-header: persistent across all workflows. */}
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-[var(--card)]/40 px-4 py-2">
+        <h2 className="truncate text-xs font-semibold text-[var(--foreground)]">{instance.title}</h2>
+        <PhasePill phase={phase} />
+      </div>
+      {/* Workflow-owned canvas. */}
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <Canvas instanceId={instance.id} folder={instance.folder} state={result.state as WorkflowState} />
+      </div>
+    </div>
+  );
+}
+
+function LoadingSkeleton({ label, title }: { label: string; title: string }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-[var(--card)]/40 px-4 py-2">
+        <span className="text-xs font-semibold text-[var(--muted)]">{title}</span>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-black/20 px-2 py-0.5 text-[10px] font-medium text-[var(--muted)]">
+          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--muted)]" />
+          Loading…
+        </span>
+      </div>
+      <div className="flex flex-1 items-center justify-center p-10">
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-white/10 border-t-indigo-400" />
+          <p className="text-xs text-[var(--muted)]">Loading {label}…</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CanvasError({ error, onRetry, title }: { error: Error; onRetry: () => void; title: string }) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-white/10 bg-[var(--card)]/40 px-4 py-2">
+        <span className="text-xs font-semibold text-[var(--muted)]">{title}</span>
+        <span className="inline-flex items-center gap-1.5 rounded-full border border-red-400/30 bg-red-500/10 px-2 py-0.5 text-[10px] font-medium text-red-300">
+          <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
+          Error
+        </span>
+      </div>
+      <div className="flex flex-1 flex-col items-center justify-center gap-3 p-10 text-center">
+        <p className="text-sm font-medium">Couldn&apos;t load workflow state</p>
+        <p className="max-w-sm text-xs text-[var(--muted)]">
+          {error.message || "The state file could not be read or parsed."}
+        </p>
+        <button
+          onClick={onRetry}
+          className="rounded-lg border border-white/10 bg-white/[0.03] px-4 py-2 text-xs font-semibold transition hover:bg-white/[0.06]"
+        >
+          Retry
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function EmptyCanvas() {

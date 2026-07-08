@@ -94,6 +94,7 @@ export async function POST(req: Request) {
   const prime: SessionPrime = {
     folder: instance.folder,
     skill: def?.skill ?? instance.workflow_type,
+    sessionPrompt: def?.sessionPrompt,
   };
 
   const encoder = new TextEncoder();

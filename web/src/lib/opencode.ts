@@ -300,6 +300,10 @@ export interface SessionPrime {
   folder: string;
   /** OpenCode skill name, e.g. "canva-carousel". */
   skill: string;
+  /** Optional workflow-specific session prompt from the registry's
+   *  WorkflowDefinition.sessionPrompt. Appended to the prime message so the
+   *  agent reads memory.md + state.json for session resume. */
+  sessionPrompt?: string;
 }
 
 /**
@@ -373,7 +377,7 @@ export async function getOrCreateSession(
  * shortcuts to calling them directly, ignoring the deterministic procedure.
  */
 function buildPrimeMessage(prime: SessionPrime): string {
-  return [
+  const lines = [
     `You are now working in an instance of the ${prime.skill} workflow.`,
     ``,
     `Your instance folder is ${prime.folder}.`,
@@ -387,9 +391,12 @@ function buildPrimeMessage(prime: SessionPrime): string {
     `(generate-design, create-design-from-candidate, export-design) yourself; the`,
     `script owns those. You are in autonomous mode (no interactive terminal), so`,
     `operate end-to-end without stopping to ask the user questions.`,
-    ``,
-    `Acknowledge briefly, then wait for the user's request.`,
-  ].join("\n");
+  ];
+  if (prime.sessionPrompt) {
+    lines.push(``, prime.sessionPrompt);
+  }
+  lines.push(``, `Acknowledge briefly, then wait for the user's request.`);
+  return lines.join("\n");
 }
 
 /** Clears the cached session for a workflow instance (e.g. if the server rejects it). */

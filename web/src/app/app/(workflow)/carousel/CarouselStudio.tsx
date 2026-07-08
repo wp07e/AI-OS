@@ -52,8 +52,6 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
   return (
     <div className="flex h-full flex-col">
       <StudioToolbar
-        title="Carousel Studio"
-        phase={phase}
         hasDesign={hasDesign}
         design={state?.design}
         slideCanvaUrl={selectedSlide?.canva_url}
