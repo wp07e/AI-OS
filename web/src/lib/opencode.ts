@@ -42,6 +42,34 @@ export async function isOpencodeReady(port: number, timeoutMs = 2000): Promise<b
   }
 }
 
+/**
+ * True when the opencode server reports the Canva MCP as connected.
+ *
+ * The `/mcp` endpoint returns an object keyed by MCP server name, each with a
+ * `status` field ("connected" | "needs_auth" | ...). This is the single source
+ * of truth for "can the agent reach Canva right now?" — there is no DB flag;
+ * status is always derived live from the container. Used to gate Canva-dependent
+ * workflows (e.g. Carousel Studio) and by the post-OAuth restart poll.
+ */
+export async function isCanvaConnected(port: number, timeoutMs = 2000): Promise<boolean> {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(opencodeUrl(port, "/mcp"), {
+      signal: ctrl.signal,
+      headers: headers(),
+    });
+    clearTimeout(t);
+    if (!res.ok) return false;
+    const data = (await res.json().catch(() => null)) as
+      | Record<string, { status?: string }>
+      | null;
+    return data?.Canva?.status === "connected";
+  } catch {
+    return false;
+  }
+}
+
 interface OpencodeSession {
   id: string;
   [k: string]: unknown;

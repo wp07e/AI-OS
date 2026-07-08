@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
+import { useCanvaStatus } from "./CanvaStatusProvider";
 
 interface Props {
   user: {
@@ -13,6 +15,7 @@ interface Props {
 
 export function AppHeader({ user }: Props) {
   const router = useRouter();
+  const { connected, loading } = useCanvaStatus();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -37,9 +40,27 @@ export function AppHeader({ user }: Props) {
 
   return (
     <header className="sticky top-0 z-20 flex h-14 shrink-0 items-center justify-between border-b border-white/10 bg-[var(--card)]/60 px-4 backdrop-blur">
-      <div className="flex items-center gap-2">
-        <div className="h-7 w-7 rounded-md bg-gradient-to-br from-indigo-500 to-sky-400 shadow" />
-        <span className="text-sm font-semibold tracking-tight">AI OS</span>
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          <div className="h-7 w-7 rounded-md bg-gradient-to-br from-indigo-500 to-sky-400 shadow" />
+          <span className="text-sm font-semibold tracking-tight">AI OS</span>
+        </div>
+        {/* Canva connection: the always-visible way to complete OAuth from the
+            main screen. Shown only on a confirmed disconnect so connected users
+            see a clean header. */}
+        {!connected && !loading && (
+          <Link
+            href="/oauth"
+            className="flex items-center gap-1.5 rounded-lg border border-amber-400/40 bg-amber-500/10 px-2.5 py-1.5 text-xs font-semibold text-amber-200 transition hover:border-amber-400/70 hover:bg-amber-500/15"
+            title="Connect Canva to enable Carousel Studio"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+            </svg>
+            Connect Canva
+          </Link>
+        )}
       </div>
 
       <div className="relative" ref={menuRef}>

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
 import { getContainerForUser, restartForUser, waitForReady } from "@/lib/docker";
+import { isCanvaConnected } from "@/lib/opencode";
 
 export const runtime = "nodejs";
 export const maxDuration = 180;
@@ -51,23 +52,12 @@ export async function POST() {
   return NextResponse.json({ ok: true });
 }
 
-/** Polls GET /mcp until the Canva entry reports status "connected". */
+/** Polls the Canva connection until connected (or timeout). Used after a
+ *  restart because MCP connections come up a few seconds after health. */
 async function waitForCanvaConnected(port: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  // Optional HTTP Basic auth if OPENCODE_SERVER_PASSWORD is set (matches the
-  // opencode.ts client). Most dev setups leave it unset.
-  const pwd = process.env.OPENCODE_SERVER_PASSWORD;
-  const headers = pwd ? { Authorization: `Basic ${Buffer.from(`opencode:${pwd}`).toString("base64")}` } : undefined;
   while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}/mcp`, { headers });
-      if (res.ok) {
-        const data = (await res.json()) as Record<string, { status?: string }>;
-        if (data?.Canva?.status === "connected") return true;
-      }
-    } catch {
-      // server briefly unreachable mid-restart — keep polling
-    }
+    if (await isCanvaConnected(port)) return true;
     await new Promise((r) => setTimeout(r, 1000));
   }
   return false;

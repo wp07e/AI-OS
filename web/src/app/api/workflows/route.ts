@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { currentUser } from "@/lib/auth";
 import { db, type WorkflowInstanceRow } from "@/lib/db";
 import { execInContainer, getContainerForUser } from "@/lib/docker";
+import { isCanvaConnected } from "@/lib/opencode";
 import { getWorkflow } from "@/lib/workflows/registry";
 
 export const runtime = "nodejs";
@@ -58,6 +59,16 @@ export async function POST(req: Request) {
 
   const def = getWorkflow(type);
   if (!def) return NextResponse.json({ error: "unknown workflow type" }, { status: 400 });
+
+  // Defense-in-depth for the client gate: refuse to create a Canva-dependent
+  // workflow if the MCP isn't connected. The rail disables the create button,
+  // but this stops a direct API call from bypassing it.
+  if (def.requiresCanva && !(await isCanvaConnected(row.opencode_port))) {
+    return NextResponse.json(
+      { error: "Canva is not connected. Connect Canva in the top bar, then create your carousel." },
+      { status: 409 },
+    );
+  }
 
   const title = String(body.title ?? `New ${def.label}`).trim().slice(0, 120);
   const id = randomUUID();

@@ -53,6 +53,7 @@ const carouselDefinition: WorkflowDefinition<CarouselState> = {
   description: "Turn AI copy into designed Instagram carousels via Canva.",
   folder: "carousels",
   skill: "canva-carousel",
+  requiresCanva: true,
   Canvas: CarouselStudio,
   useState: useCarouselState,
   sessionPrompt: [

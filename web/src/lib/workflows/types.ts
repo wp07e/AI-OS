@@ -66,6 +66,10 @@ export interface WorkflowDefinition<S extends WorkflowState = WorkflowState> {
   readonly folder: string;
   /** OpenCode skill name the agent should load for this workflow. */
   readonly skill: string;
+  /** True if this workflow needs the Canva MCP connected. The shell gates
+   *  create/open behind the Canva connection check when true (see
+   *  CanvaStatusProvider). Defaults to false. */
+  readonly requiresCanva?: boolean;
 
   /* ── 3. CANVAS (the pluggable UI — 100% workflow-owned) ───────── */
   readonly Canvas: ComponentType<CanvasProps<S>>;

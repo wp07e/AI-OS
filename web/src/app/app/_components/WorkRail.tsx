@@ -1,7 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useState } from "react";
 import { getWorkflow, WORKFLOW_TYPES } from "@/lib/workflows/registry";
+import { useCanvaStatus } from "./CanvaStatusProvider";
 import type { WorkflowInstance } from "./AppShell";
 
 interface Props {
@@ -18,8 +20,17 @@ interface Props {
  *
  * Drawer model: each workflow type is a collapsible drawer; opening it shows
  * that type's instances. Clicking an instance selects it in the shell.
+ *
+ * Workflows flagged `requiresCanva` are gated until the Canva MCP connects:
+ * their create + open buttons are disabled and an inline note points at the
+ * "Connect Canva" affordance in the header (see CanvaStatusProvider).
  */
 export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: Props) {
+  const { connected, loading: canvaLoading } = useCanvaStatus();
+  // Block only on a confirmed disconnect; while the probe is in flight the
+  // buttons stay enabled so connected users never see a gate flicker.
+  const canvaBlocked = !connected && !canvaLoading;
+
   const [openTypes, setOpenTypes] = useState<Set<string>>(new Set(["carousel"]));
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
@@ -80,6 +91,7 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
             const instancesOfType = instances.filter((i) => i.workflow_type === type);
             const isOpen = openTypes.has(type);
             const Icon = def.icon;
+            const typeBlocked = def.requiresCanva && canvaBlocked;
             return (
               <div key={type}>
                 <button
@@ -96,24 +108,41 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
 
                 {isOpen && (
                   <div className="ml-6 flex flex-col gap-0.5 border-l border-white/10 pl-2">
+                    {typeBlocked && (
+                      <p className="px-2 py-1 text-[11px] leading-snug text-amber-300/80">
+                        Requires Canva —{" "}
+                        <Link href="/oauth" className="underline decoration-amber-300/40 underline-offset-2 hover:decoration-amber-300/80">
+                          connect in the top bar
+                        </Link>
+                      </p>
+                    )}
                     {instancesOfType.length === 0 ? (
                       <p className="px-2 py-1 text-xs text-[var(--muted)]">No items yet</p>
                     ) : (
-                      instancesOfType.map((inst) => (
-                        <button
-                          key={inst.id}
-                          onClick={() => onSelect(inst.id)}
-                          className={
-                            "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition " +
-                            (inst.id === activeId
-                              ? "bg-indigo-500/15 text-indigo-200"
-                              : "text-[var(--foreground)]/80 hover:bg-white/5")
-                          }
-                        >
-                          <span className="h-1.5 w-1.5 rounded-full bg-current opacity-60" />
-                          <span className="flex-1 truncate">{inst.title}</span>
-                        </button>
-                      ))
+                      instancesOfType.map((inst) => {
+                        const blocked = typeBlocked;
+                        return (
+                          <button
+                            key={inst.id}
+                            onClick={() => {
+                              if (blocked) return;
+                              onSelect(inst.id);
+                            }}
+                            disabled={blocked}
+                            className={
+                              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition " +
+                              (blocked
+                                ? "cursor-not-allowed text-[var(--muted)] opacity-50"
+                                : inst.id === activeId
+                                  ? "bg-indigo-500/15 text-indigo-200"
+                                  : "text-[var(--foreground)]/80 hover:bg-white/5")
+                            }
+                          >
+                            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-60" />
+                            <span className="flex-1 truncate">{inst.title}</span>
+                          </button>
+                        );
+                      })
                     )}
                   </div>
                 )}
@@ -129,13 +158,20 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
             const def = getWorkflow(type);
             if (!def) return null;
             const Icon = def.icon;
+            const blocked = def.requiresCanva && canvaBlocked;
             return (
               <button
                 key={type}
-                onClick={() => createWorkflow(type)}
-                disabled={creating}
-                title={`New ${def.label}`}
-                className="flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs transition hover:bg-white/[0.07] disabled:opacity-50"
+                onClick={() => {
+                  if (blocked) return;
+                  createWorkflow(type);
+                }}
+                disabled={creating || blocked}
+                title={blocked ? "Connect Canva first" : `New ${def.label}`}
+                className={
+                  "flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1.5 text-xs transition hover:bg-white/[0.07] disabled:opacity-50 " +
+                  (blocked ? "cursor-not-allowed" : "")
+                }
               >
                 <Icon className="text-[var(--muted)]" />
                 <span>{def.label}</span>

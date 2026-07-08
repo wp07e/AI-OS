@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { currentUser } from "@/lib/auth";
 import { getContainerForUser } from "@/lib/docker";
 import { AppHeader } from "./_components/AppHeader";
+import { CanvaStatusProvider } from "./_components/CanvaStatusProvider";
 
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await currentUser();
@@ -12,14 +13,16 @@ export default async function AppLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="flex min-h-full flex-1 flex-col">
-      <AppHeader
-        user={{
-          username: user.username,
-          displayName: user.display_name ?? user.username,
-          avatarUrl: user.avatar_url,
-        }}
-      />
-      <div className="flex flex-1 flex-col overflow-hidden">{children}</div>
+      <CanvaStatusProvider>
+        <AppHeader
+          user={{
+            username: user.username,
+            displayName: user.display_name ?? user.username,
+            avatarUrl: user.avatar_url,
+          }}
+        />
+        <div className="flex flex-1 flex-col overflow-hidden">{children}</div>
+      </CanvaStatusProvider>
     </div>
   );
 }
