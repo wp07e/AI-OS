@@ -41,8 +41,12 @@ export function AppShell() {
       const data = (await res.json().catch(() => ({}))) as { instances?: WorkflowInstance[] };
       const list = data.instances ?? [];
       setInstances(list);
-      // Keep an active selection if possible; otherwise default to the first.
-      setActiveId((current) => current ?? list[0]?.id ?? null);
+      // Keep the active selection if it still exists; otherwise fall back to the
+      // first. This handles deletions (the active lane going away) and any other
+      // external mutation that removes the selected instance.
+      setActiveId((current) =>
+        current && list.some((i) => i.id === current) ? current : list[0]?.id ?? null,
+      );
     } catch {
       // Non-fatal: rail will just show empty state.
     } finally {

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
-import { db } from "@/lib/db";
+import { db, type UserRow } from "@/lib/db";
+import { purgeForUser } from "@/lib/docker";
 
 export const runtime = "nodejs";
 
@@ -108,8 +109,8 @@ export async function DELETE(req: Request) {
   }
 
   // Prevent deleting other admins
-  const target = db().prepare("SELECT is_admin, username FROM users WHERE id = ?").get(userId) as
-    | { is_admin: number; username: string }
+  const target = db().prepare("SELECT id, username, is_admin FROM users WHERE id = ?").get(userId) as
+    | { id: number; username: string; is_admin: number }
     | undefined;
   if (!target) {
     return NextResponse.json({ error: "User not found." }, { status: 404 });
@@ -117,6 +118,23 @@ export async function DELETE(req: Request) {
   if (target.is_admin === 1) {
     return NextResponse.json({ error: "Cannot delete admin users." }, { status: 400 });
   }
+
+  // Fully purge the user's footprint: tear down their container + workspace
+  // volume, then delete the DB row (cascades to sessions/containers/workflows).
+  // Without this, deleting a user leaks their Docker resources. purgeForUser
+  // logs and swallows Docker errors so a stuck resource never blocks the delete.
+  const targetRow = {
+    id: target.id,
+    username: target.username,
+    // The remaining fields aren't used by purgeForUser (it only needs id +
+    // username), but UserRow requires them to satisfy the type.
+    password_hash: "",
+    display_name: null,
+    avatar_url: null,
+    is_admin: target.is_admin,
+    created_at: 0,
+  } satisfies UserRow;
+  await purgeForUser(targetRow);
 
   db().prepare("DELETE FROM users WHERE id = ?").run(userId);
   return NextResponse.json({ ok: true });

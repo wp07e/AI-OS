@@ -34,6 +34,8 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
   const [openTypes, setOpenTypes] = useState<Set<string>>(new Set(["carousel"]));
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   function toggleType(type: string) {
     setOpenTypes((prev) => {
@@ -70,6 +72,30 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
       setCreateError("Network error creating workflow.");
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function deleteWorkflow(inst: WorkflowInstance) {
+    const confirmed = window.confirm(
+      `Delete "${inst.title}"?\n\nThis removes the lane and all of its files. This cannot be undone.`,
+    );
+    if (!confirmed) return;
+    setDeletingId(inst.id);
+    setDeleteError(null);
+    try {
+      const res = await fetch(`/api/workflows/${encodeURIComponent(inst.id)}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        setDeleteError(data.error ?? `Failed (${res.status})`);
+        return;
+      }
+      await onRefresh();
+    } catch {
+      setDeleteError("Network error deleting workflow.");
+    } finally {
+      setDeletingId(null);
     }
   }
 
@@ -122,25 +148,55 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
                       instancesOfType.map((inst) => {
                         const blocked = typeBlocked;
                         return (
-                          <button
+                          <div
                             key={inst.id}
-                            onClick={() => {
-                              if (blocked) return;
-                              onSelect(inst.id);
-                            }}
-                            disabled={blocked}
                             className={
-                              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition " +
-                              (blocked
-                                ? "cursor-not-allowed text-[var(--muted)] opacity-50"
-                                : inst.id === activeId
-                                  ? "bg-indigo-500/15 text-indigo-200"
-                                  : "text-[var(--foreground)]/80 hover:bg-white/5")
+                              "group relative flex items-center rounded-md transition " +
+                              (blocked ? "opacity-50" : "")
                             }
                           >
-                            <span className="h-1.5 w-1.5 rounded-full bg-current opacity-60" />
-                            <span className="flex-1 truncate">{inst.title}</span>
-                          </button>
+                            <button
+                              onClick={() => {
+                                if (blocked) return;
+                                onSelect(inst.id);
+                              }}
+                              disabled={blocked}
+                              className={
+                                "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition " +
+                                (blocked
+                                  ? "cursor-not-allowed text-[var(--muted)]"
+                                  : inst.id === activeId
+                                    ? "bg-indigo-500/15 text-indigo-200"
+                                    : "text-[var(--foreground)]/80 hover:bg-white/5")
+                              }
+                            >
+                              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-60" />
+                              <span className="flex-1 truncate pr-12">{inst.title}</span>
+                            </button>
+                            {!blocked && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (deletingId !== null) return;
+                                  deleteWorkflow(inst);
+                                }}
+                                disabled={deletingId !== null}
+                                title={
+                                  deletingId === inst.id
+                                    ? "Deleting…"
+                                    : `Delete "${inst.title}"`
+                                }
+                                aria-label={`Delete ${inst.title}`}
+                                className="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-0 transition hover:bg-red-500/15 hover:text-red-300 focus-visible:opacity-100 disabled:cursor-wait group-hover:opacity-100"
+                              >
+                                {deletingId === inst.id ? (
+                                  <SpinnerIcon />
+                                ) : (
+                                  <TrashIcon />
+                                )}
+                              </button>
+                            )}
+                          </div>
                         );
                       })
                     )}
@@ -182,6 +238,9 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
         <p className="text-[10px] uppercase tracking-wider text-[var(--muted)]">+ New workflow</p>
         {createError && (
           <p className="rounded-md bg-red-500/10 px-2 py-1 text-[10px] text-red-300">{createError}</p>
+        )}
+        {deleteError && (
+          <p className="rounded-md bg-red-500/10 px-2 py-1 text-[10px] text-red-300">{deleteError}</p>
         )}
       </div>
 
@@ -244,6 +303,26 @@ function TemplateIcon() {
       <rect x="14" y="3" width="7" height="7" rx="1" />
       <rect x="3" y="14" width="7" height="7" rx="1" />
       <rect x="14" y="14" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <polyline points="3 6 5 6 21 6" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6M14 11v6" />
+      <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  );
+}
+
+function SpinnerIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" className="animate-spin" aria-hidden>
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" opacity="0.25" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
     </svg>
   );
 }

@@ -320,10 +320,49 @@ export async function stopForUser(userId: number): Promise<void> {
   if (!row) return;
   const envFile = writeTransientEnv(row);
   try {
-    await runCompose(["-p", row.project_name, "down"], envFile);
+    // `stop` (not `down`): halt the process but KEEP the container object so the
+    // same container (same Docker container ID) resumes in place on the user's
+    // next login. `down` would remove it and a new container ID would be created
+    // on relaunch. RAM is freed either way; user data lives in the external
+    // workspace volume and is safe under both. `restart: unless-stopped` in the
+    // compose file means a stopped container isn't auto-restarted by the daemon
+    // but IS started by the next `compose up -d`.
+    await runCompose(["-p", row.project_name, "stop"], envFile);
     db().prepare("UPDATE containers SET status = ? WHERE user_id = ?").run("stopped", userId);
   } finally {
     rmSync(envFile, { recursive: false, force: true });
+  }
+}
+
+/**
+ * Fully tears down a user's Docker footprint: stops + removes their container
+ * AND deletes their per-user workspace volume (all lane files, OpenCode state,
+ * cached Canva OAuth tokens). Used by account deletion (self-service and admin).
+ *
+ * Errors are logged, not thrown: a stuck Docker resource must never block a DB
+ * account purge (the user must always be able to leave). The DB `ON DELETE
+ * CASCADE` cleans up the `containers` row and all other child rows afterward.
+ */
+export async function purgeForUser(user: UserRow): Promise<void> {
+  const row = getContainerForUser(user.id);
+  if (row) {
+    const envFile = writeTransientEnv(row);
+    try {
+      // `down` (not `stop`): actually remove the container on account deletion.
+      await runCompose(["-p", row.project_name, "down"], envFile);
+    } catch (err) {
+      console.error(`[purge] compose down failed for ${user.username}`, err);
+    } finally {
+      rmSync(envFile, { recursive: false, force: true });
+    }
+  }
+
+  // Remove the per-user workspace volume (external named volume — `down` alone
+  // would leave it behind). This is where lane files + Canva tokens live.
+  try {
+    await client.getVolume(workspaceVolumeFor(user.username)).remove({ force: true });
+  } catch (err) {
+    console.error(`[purge] volume remove failed for ${user.username}`, err);
   }
 }
 
