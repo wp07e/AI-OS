@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { getWorkflow, WORKFLOW_TYPES } from "@/lib/workflows/registry";
 import { useCanvaStatus } from "./CanvaStatusProvider";
 import type { WorkflowInstance } from "./AppShell";
@@ -44,6 +44,9 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
   const [createError, setCreateError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingTitle, setEditingTitle] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
 
   function toggleType(type: string) {
     setOpenTypes((prev) => {
@@ -106,6 +109,39 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
       setDeletingId(null);
     }
   }
+
+  async function renameWorkflow(inst: WorkflowInstance, newTitle: string) {
+    const trimmed = newTitle.trim().slice(0, 120);
+    if (!trimmed || trimmed === inst.title) {
+      setEditingId(null);
+      return;
+    }
+    try {
+      const res = await fetch(`/api/workflows/${encodeURIComponent(inst.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: trimmed }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        console.error("Rename failed:", data.error ?? res.status);
+        return;
+      }
+      await onRefresh();
+    } catch {
+      console.error("Network error renaming workflow.");
+    } finally {
+      setEditingId(null);
+    }
+  }
+
+  // Auto-focus the rename input when editing starts
+  useEffect(() => {
+    if (editingId && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [editingId]);
 
   return (
     <aside className="flex min-h-0 flex-col overflow-y-auto border-r border-white/10 bg-[var(--card)]/30">
@@ -179,7 +215,36 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
                               }
                             >
                               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-60" />
-                              <span className="flex-1 truncate pr-20">{inst.title}</span>
+                              {editingId === inst.id ? (
+                                <input
+                                  ref={renameInputRef}
+                                  value={editingTitle}
+                                  onChange={(e) => setEditingTitle(e.target.value)}
+                                  onBlur={() => renameWorkflow(inst, editingTitle)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") {
+                                      e.preventDefault();
+                                      renameWorkflow(inst, editingTitle);
+                                    } else if (e.key === "Escape") {
+                                      setEditingId(null);
+                                    }
+                                  }}
+                                  onClick={(e) => e.stopPropagation()}
+                                  className="flex-1 min-w-0 bg-transparent px-1 py-0 text-xs text-inherit outline-none ring-1 ring-indigo-500/50 rounded"
+                                />
+                              ) : (
+                                <span
+                                  className="flex-1 truncate pr-20 cursor-default"
+                                  onDoubleClick={(e) => {
+                                    e.stopPropagation();
+                                    if (blocked) return;
+                                    setEditingId(inst.id);
+                                    setEditingTitle(inst.title);
+                                  }}
+                                >
+                                  {inst.title}
+                                </span>
+                              )}
                             </button>
                             {!blocked && (
                               <>
@@ -191,10 +256,10 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
                                   title="Brand for this carousel"
                                   aria-label={`Brand settings for ${inst.title}`}
                                   className={
-                                    "absolute right-8 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded transition group-hover:opacity-100 " +
+                                    "absolute right-8 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded transition " +
                                     (brandApplied[inst.id]
                                       ? "opacity-100 text-indigo-300 hover:bg-indigo-500/15"
-                                      : "text-[var(--muted)] opacity-0 hover:bg-white/5 hover:text-[var(--foreground)] focus-visible:opacity-100")
+                                      : "text-[var(--muted)] opacity-100 hover:bg-white/5 hover:text-[var(--foreground)]")
                                   }
                                 >
                                   <BrandSwatchIcon active={!!brandApplied[inst.id]} />
@@ -212,7 +277,7 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
                                       : `Delete "${inst.title}"`
                                   }
                                   aria-label={`Delete ${inst.title}`}
-                                  className="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-0 transition hover:bg-red-500/15 hover:text-red-300 focus-visible:opacity-100 disabled:cursor-wait group-hover:opacity-100"
+                                  className="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-100 transition hover:bg-red-500/15 hover:text-red-300 disabled:cursor-wait"
                                 >
                                   {deletingId === inst.id ? (
                                     <SpinnerIcon />

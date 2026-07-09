@@ -6,6 +6,42 @@ import { execInContainer, getContainerForUser } from "@/lib/docker";
 export const runtime = "nodejs";
 
 /**
+ * PATCH /api/workflows/<instanceId>
+ *
+ * Renames a workflow instance (lane title).
+ * Body: { title: string } — trimmed, max 120 chars, must be non-empty.
+ */
+export async function PATCH(
+  req: Request,
+  ctx: { params: Promise<{ instanceId: string }> },
+) {
+  const user = await currentUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const { instanceId } = await ctx.params;
+
+  const body = (await req.json().catch(() => ({}))) as { title?: string };
+  const title = String(body.title ?? "")
+    .trim()
+    .slice(0, 120);
+  if (!title) {
+    return NextResponse.json({ error: "title is required" }, { status: 400 });
+  }
+
+  const row = db()
+    .prepare(
+      "UPDATE workflow_instances SET title = ?, updated_at = datetime('now') WHERE id = ? AND user_id = ?",
+    )
+    .run(title, instanceId, user.id);
+
+  if (row.changes === 0) {
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
+  return NextResponse.json({ ok: true });
+}
+
+/**
  * DELETE /api/workflows/<instanceId>
  *
  * Deletes a workflow instance (a "lane") and its associated workspace files:
