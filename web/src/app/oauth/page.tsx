@@ -18,8 +18,8 @@ interface RelayInfo {
   oauthPort: number;
 }
 
-const GITHUB_RAW =
-  "https://github.com/wp07e/AI-OS/raw/main/scripts/canva-oauth-relay.py";
+const SCRIPT_URL =
+  "https://cdn.jsdelivr.net/gh/wp07e/AI-OS@main/scripts/canva-oauth-relay.py";
 const GITHUB_BLOB =
   "https://github.com/wp07e/AI-OS/blob/main/scripts/canva-oauth-relay.py";
 
@@ -165,12 +165,12 @@ export default function OauthPage() {
 
   /** macOS / Linux: curl downloads the script inline, then python3 runs it. */
   function buildUnixCommand(info: RelayInfo): string {
-    return `cd /tmp && curl -fsSLO ${GITHUB_RAW} && python3 canva-oauth-relay.py --port ${info.oauthPort} --server ${info.server} --token ${info.token}`;
+    return `cd /tmp && curl -fsSLO ${SCRIPT_URL} && python3 canva-oauth-relay.py --port ${info.oauthPort} --server ${info.server} --token ${info.token}`;
   }
 
   /** Windows: PowerShell downloads via Invoke-WebRequest, then python runs it. */
   function buildWindowsCommand(info: RelayInfo): string {
-    return `cd $env:TEMP; Invoke-WebRequest -Uri "${GITHUB_RAW}" -OutFile "canva-oauth-relay.py"; python canva-oauth-relay.py --port ${info.oauthPort} --server ${info.server} --token ${info.token}`;
+    return `cd $env:TEMP; Invoke-WebRequest -Uri "${SCRIPT_URL}" -OutFile "canva-oauth-relay.py"; python canva-oauth-relay.py --port ${info.oauthPort} --server ${info.server} --token ${info.token}`;
   }
 
   return (
@@ -212,14 +212,15 @@ export default function OauthPage() {
               <ul className="mt-1.5 list-disc space-y-1 pl-4 leading-relaxed">
                 <li>
                   The code is open source and uses only the Python standard library (no
-                  third-party packages).{" "}
+                  third-party packages). The download is mirrored from GitHub via jsDelivr
+                  (a trusted public CDN) — byte-identical to the repo.{" "}
                   <a
                     href={GITHUB_BLOB}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="font-medium text-emerald-300 underline underline-offset-2 hover:text-emerald-200"
                   >
-                    Read it on GitHub →
+                    Read the source on GitHub →
                   </a>
                 </li>
               </ul>
