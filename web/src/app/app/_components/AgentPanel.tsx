@@ -5,6 +5,7 @@ import { useAgentChatContext } from "@/lib/hooks/AgentChatContext";
 import type { ChatMessage, StreamingState } from "@/lib/hooks/useAgentChat";
 import type { BrandCardKey } from "@/lib/brand/cards";
 import { BRAND_CARD_EXAMPLES, brandInputPlaceholder } from "@/lib/brand/examples";
+import { WORKFLOW_EXAMPLES } from "@/lib/workflows/examples";
 
 interface Props {
   /** Active workflow instance id, or null when nothing is selected. */
@@ -68,8 +69,10 @@ export function AgentPanel({
       ? `${workflowType} lane`
       : "Agent";
 
-  // Examples shown when brand AI is active and there's no conversation yet.
-  const examples = brandOpen && activeBrandCard ? BRAND_CARD_EXAMPLES[activeBrandCard] : [];
+  // Examples shown when the AI is active and there's no conversation yet.
+  const examples = brandOpen && activeBrandCard
+    ? BRAND_CARD_EXAMPLES[activeBrandCard]
+    : workflowType ? (WORKFLOW_EXAMPLES[workflowType] ?? []) : [];
   const placeholder = brandOpen ? brandInputPlaceholder(activeBrandCard) : "Message the agent…";
 
   return (
@@ -123,9 +126,9 @@ export function AgentPanel({
             <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.02] p-4 text-center text-xs text-[var(--muted)]">
               {brandOpen
                 ? "Ask the AI to help with this card — or try an example below."
-                : "Talk to the agent to drive this workflow."}
+                : "Ask the AI to help with this workflow — or try an example below."}
             </div>
-            {brandOpen && examples.length > 0 && (
+            {examples.length > 0 && (
               <div className="flex flex-col gap-1.5">
                 {examples.map((ex) => (
                   <button
