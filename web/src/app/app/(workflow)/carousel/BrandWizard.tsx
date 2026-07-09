@@ -411,9 +411,24 @@ function StepBody({
         <SummaryRow label="Typography" value={selection.typography ? "On" : "Off"} on={selection.typography} />
         <SummaryRow label="Assets" value={`${totalAssets}`} on={totalAssets > 0} />
       </div>
+      {totalAssets > 0 && (
+        <div className="rounded-lg border border-sky-400/30 bg-sky-500/10 px-3 py-2 text-[11px] leading-relaxed text-sky-100">
+          <p className="font-medium">How assets work on generated slides</p>
+          <p className="mt-1 text-sky-100/80">
+            Colors and typography are applied consistently. Selected assets (logos, photos, icons) are made available
+            to Canva&apos;s AI, which <strong>decides whether and how to use them on each slide</strong> — it may not
+            use every asset.
+          </p>
+          <p className="mt-1.5 text-sky-100/80">
+            If a slide doesn&apos;t use an asset the way you want, ask the AI to edit it after generation
+            (e.g. &ldquo;replace the icon on slide 4 with my icon&rdquo;). The AI knows your selected assets and can
+            place them precisely using Canva&apos;s edit tools.
+          </p>
+        </div>
+      )}
       {!selection.enabled && (
         <p className="rounded-lg border border-amber-400/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
-          “Apply brand” is off — nothing will be applied. Turn it on below to use this selection.
+          &ldquo;Apply brand&rdquo; is off — nothing will be applied. Turn it on below to use this selection.
         </p>
       )}
     </div>

@@ -73,19 +73,31 @@ export async function buildLaneBrandPrefill(
 
   // Selected assets — the agent should complement, not conflict
   const assetParts: string[] = [];
+  const byId = new Map(kit.assets.map((a) => [a.id, a]));
+  const embeddingEnabled = !!process.env.PUBLIC_BASE_URL;
   for (const cat of ["logo", "photo", "component", "icon"] as const) {
     const ids = selection.assets[cat] ?? [];
     if (ids.length === 0) continue;
-    const byId = new Map(kit.assets.map((a) => [a.id, a]));
-    const labels = ids.map((id) => byId.get(id)?.label ?? id);
-    assetParts.push(`${ids.length} ${cat}${ids.length === 1 ? "" : "s"} (${labels.join(", ")})`);
+    // Include the label + the cached Canva asset_id (available after the first
+    // generation uploads it). The agent needs the asset_id for edit operations
+    // (update_fill) when the user asks to place an asset on a specific slide.
+    const entries = ids.map((id) => {
+      const a = byId.get(id);
+      const label = a?.label ?? id;
+      const canvaId = (a as { canva_asset_id?: string } | undefined)?.canva_asset_id;
+      return canvaId ? `${label} (canva_asset_id=${canvaId})` : label;
+    });
+    assetParts.push(`${ids.length} ${cat}${ids.length === 1 ? "" : "s"} (${entries.join(", ")})`);
   }
   if (assetParts.length > 0) {
-    const embedding = process.env.PUBLIC_BASE_URL
-      ? "These will be embedded into the generated slides by the pipeline"
+    const embedding = embeddingEnabled
+      ? "These are uploaded to Canva and passed to generate-design; Canva's AI decides whether/how to use them on each slide — it may not use every asset"
       : "These will be described in the design prompt (Canva approximates; real embedding needs PUBLIC_BASE_URL)";
     lines.push(`Selected assets: ${assetParts.join("; ")}. ${embedding}.`);
     lines.push(`Write copy that complements these assets; don't request different or conflicting imagery.`);
+    lines.push(
+      `If after generation the user wants a specific asset on a specific slide, use the Canva edit tools (read template.json for element_ids, then update_fill with the canva_asset_id above) to place it deterministically.`,
+    );
   }
 
   lines.push(`(This context is silent — don't acknowledge or repeat it. Just factor it into your work.)`);
