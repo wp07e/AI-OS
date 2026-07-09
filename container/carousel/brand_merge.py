@@ -161,13 +161,20 @@ def resolve_asset_ids(
     abort the whole carousel. The preamble's text descriptions still apply.
     """
     if not os.environ.get("PUBLIC_BASE_URL"):
+        print("[brand] resolve_asset_ids: PUBLIC_BASE_URL not set in container env → Tier 1 (no upload)")
         return []
     selection = load_json(os.path.join(instance_folder, SELECTION_FILENAME))
-    if not selection or not selection.get("enabled"):
+    if not selection:
+        print(f"[brand] resolve_asset_ids: no brand_selection.json at {instance_folder}/{SELECTION_FILENAME}")
+        return []
+    if not selection.get("enabled"):
+        print("[brand] resolve_asset_ids: selection.enabled is false → skipping")
         return []
     urls = selection.get("resolvedAssetUrls") or {}
     if not urls:
+        print("[brand] resolve_asset_ids: resolvedAssetUrls is empty in selection → nothing to upload")
         return []
+    print(f"[brand] resolve_asset_ids: {len(urls)} asset URL(s) to upload")
 
     # Imported lazily so brand_merge stays decoupled from the MCP client.
     from canva_ops import upload_asset_from_url  # noqa: WPS433
@@ -184,19 +191,23 @@ def resolve_asset_ids(
         asset = assets_by_id.get(asset_id)
         cached = asset.get("canva_asset_id") if asset else None
         if cached:
+            print(f"[brand]   {asset_id}: cached canva_asset_id={cached} (skip upload)")
             # Reuse the previously uploaded asset — no duplicate upload.
             asset_ids.append(cached)
             continue
         try:
+            print(f"[brand]   {asset_id}: uploading from {url[:80]}…")
             canva_id = upload_asset_from_url(client, url, f"brand-{asset_id}")
+            print(f"[brand]   {asset_id}: uploaded → canva_asset_id={canva_id}")
             asset_ids.append(canva_id)
             # Cache it on the kit so future runs (any lane) skip the upload.
             if asset is not None:
                 asset["canva_asset_id"] = canva_id
                 kit_dirty = True
         except Exception as exc:  # noqa: BLE001 — non-fatal, best-effort
-            print(f"[brand] asset upload failed for {asset_id}: {exc}")
+            print(f"[brand]   {asset_id}: upload FAILED: {exc}")
 
+    print(f"[brand] resolve_asset_ids: done, returning {len(asset_ids)} asset id(s)")
     # Write the cache back if any new Canva ids were recorded.
     if kit_dirty:
         try:

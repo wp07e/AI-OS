@@ -206,7 +206,9 @@ def upload_asset_from_url(
 
     Raises McpError on any failure. Returns the asset_id.
     """
+    print(f"[canva] upload-asset-from-url: url={url[:90]} name={name}")
     resp = client.call_tool("upload-asset-from-url", {"url": url, "name": name})
+    print(f"[canva] upload-asset-from-url: response={str(resp)[:300]}")
     asset = (resp or {}).get("asset") or {}
     asset_id = asset.get("id")
     if not asset_id:
