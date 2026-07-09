@@ -551,6 +551,21 @@ export async function workspacePathExists(
   return r.code === 0;
 }
 
+/**
+ * Gets the modification time (epoch seconds) of a workspace file.
+ * Returns null if the file is missing or stat fails.
+ * Uses `stat -c %Y` for GNU coreutils (the container is Linux-based).
+ */
+export async function statWorkspaceFile(
+  row: ContainerRow,
+  path: string,
+): Promise<number | null> {
+  const r = await execInContainer(row, ["stat", "-c", "%Y", path], { user: APP_USER });
+  if (r.code !== 0) return null;
+  const mtime = Number(r.stdout.trim());
+  return Number.isFinite(mtime) ? mtime : null;
+}
+
 // ─── Workspace file writes ──────────────────────────────────────────────────
 //
 // The host writes workspace files by piping bytes into `cat > <path>` over

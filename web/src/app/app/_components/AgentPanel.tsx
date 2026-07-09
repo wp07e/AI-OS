@@ -40,6 +40,7 @@ export function AgentPanel({
   const chat = useAgentChatContext();
   const [input, setInput] = useState("");
   const [showDebug, setShowDebug] = useState(false);
+  const [showThinking, setShowThinking] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -80,15 +81,26 @@ export function AgentPanel({
           </span>
           <span className="text-xs font-medium tracking-tight">{headerLabel}</span>
         </div>
-        <label className="flex cursor-pointer items-center gap-1 text-[10px] text-[var(--muted)]">
-          <input
-            type="checkbox"
-            checked={showDebug}
-            onChange={(e) => setShowDebug(e.target.checked)}
-            className="h-2.5 w-2.5 accent-indigo-400"
-          />
-          raw
-        </label>
+        <div className="flex items-center gap-2">
+          <label className="flex cursor-pointer items-center gap-1 text-[10px] text-[var(--muted)]">
+            <input
+              type="checkbox"
+              checked={showThinking}
+              onChange={(e) => setShowThinking(e.target.checked)}
+              className="h-2.5 w-2.5 accent-indigo-400"
+            />
+            thinking
+          </label>
+          <label className="flex cursor-pointer items-center gap-1 text-[10px] text-[var(--muted)]">
+            <input
+              type="checkbox"
+              checked={showDebug}
+              onChange={(e) => setShowDebug(e.target.checked)}
+              className="h-2.5 w-2.5 accent-indigo-400"
+            />
+            raw
+          </label>
+        </div>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3">
@@ -154,7 +166,7 @@ export function AgentPanel({
 
       {/* Stationary thinking band — sits OUTSIDE the scroll area so reasoning
           updates never push existing messages down. Vanishes when streaming ends. */}
-      {chat.streaming && <ThinkingBand streaming={chat.streaming} />}
+      {chat.streaming && showThinking && <ThinkingBand streaming={chat.streaming} />}
 
       <form
         onSubmit={onSubmit}
@@ -198,14 +210,6 @@ function MessageBubble({ message, showDebug }: { message: ChatMessage; showDebug
         {message.content}
         {showCaret && <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse bg-indigo-400 align-middle" />}
       </div>
-      {!isUser && message.reasoning && (
-        <details className="w-full rounded-lg border border-white/5 bg-black/20 px-2 py-1 text-[10px]">
-          <summary className="cursor-pointer text-[var(--muted)]">Show thinking</summary>
-          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-[9px] leading-relaxed text-[var(--muted)]">
-            {message.reasoning}
-          </pre>
-        </details>
-      )}
       {!isUser && message.response?.raw?.parts && showDebug && (
         <details className="w-full rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-[10px]">
           <summary className="cursor-pointer text-[var(--muted)]">

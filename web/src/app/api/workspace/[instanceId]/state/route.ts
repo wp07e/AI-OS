@@ -5,6 +5,7 @@ import {
   getContainerForUser,
   listWorkspaceDir,
   readWorkspaceFileText,
+  statWorkspaceFile,
   workspacePathExists,
 } from "@/lib/docker";
 
@@ -89,6 +90,25 @@ export async function GET(
   let exports: string[] = [];
   if (await workspacePathExists(row, `${folder}/exports`)) {
     exports = await listWorkspaceDir(row, `${folder}/exports`);
+  }
+
+  // Robustness: if the agent saved new export files but forgot to bump
+  // lastUpdated in state.json, derive a fresher timestamp from the export
+  // file mtimes.  This guarantees the canvas cache-buster (?v=) changes
+  // whenever a PNG is overwritten, so the preview auto-refreshes.
+  if (exports.length > 0) {
+    const stateEpoch = new Date(state.lastUpdated).getTime() / 1000;
+    let youngest = stateEpoch;
+    // Stat in parallel — fast even with many slides.
+    const mtimes = await Promise.all(
+      exports.map((name) => statWorkspaceFile(row, `${folder}/${name}`)),
+    );
+    for (const mtime of mtimes) {
+      if (mtime !== null && mtime > youngest) youngest = mtime;
+    }
+    if (youngest > stateEpoch) {
+      state.lastUpdated = new Date(youngest * 1000).toISOString();
+    }
   }
 
   return NextResponse.json({
