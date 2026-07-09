@@ -70,6 +70,7 @@ interface ComposeEnv {
   OPENAI_API_KEY: string;
   XAI_API_KEY: string;
   LAYERRE_API_KEY: string;
+  PUBLIC_BASE_URL: string;
   OPENCODE_PORT: string;
   OAUTH_PORT: string;
   RELAY_PORT: string;
@@ -102,6 +103,9 @@ function loadContainerEnv(): Omit<
     OPENAI_API_KEY: parsed.OPENAI_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
     XAI_API_KEY: parsed.XAI_API_KEY ?? process.env.XAI_API_KEY ?? "",
     LAYERRE_API_KEY: parsed.LAYERRE_API_KEY ?? process.env.LAYERRE_API_KEY ?? "",
+    // Public base URL for the asset proxy (Tier 2 asset embedding). Empty in
+    // dev → pipeline falls back to Tier 1 (describe-only).
+    PUBLIC_BASE_URL: parsed.PUBLIC_BASE_URL ?? process.env.PUBLIC_BASE_URL ?? "",
   };
 }
 
@@ -545,4 +549,97 @@ export async function workspacePathExists(
   // `test -e` is silent on success (exit 0) and silent on failure (exit 1).
   const r = await execInContainer(row, ["test", "-e", path], { user: APP_USER });
   return r.code === 0;
+}
+
+// ─── Workspace file writes ──────────────────────────────────────────────────
+//
+// The host writes workspace files by piping bytes into `cat > <path>` over
+// `docker compose exec -T` (no TTY, clean stdin). Used by the brand library
+// to persist brand.json and uploaded assets under /workspace/brand/.
+//
+// Callers build paths from server-controlled values (UUIDs + sanitized
+// extensions) — never raw user input — so shell quoting is safe.
+
+/**
+ * Writes UTF-8 text to a workspace path, creating or overwriting the file.
+ * The parent directory must already exist (use ensureWorkspaceDir first).
+ * Throws on non-zero exit. stdin is closed after writing the payload.
+ */
+export function writeWorkspaceFileText(
+  row: ContainerRow,
+  path: string,
+  text: string,
+): Promise<void> {
+  return writeViaStdin(row, path, Buffer.from(text, "utf8"));
+}
+
+/**
+ * Writes a binary buffer to a workspace path. Same contract as
+ * writeWorkspaceFileText. Used for uploaded image assets.
+ */
+export function writeWorkspaceFileBuffer(
+  row: ContainerRow,
+  path: string,
+  buffer: Buffer,
+): Promise<void> {
+  return writeViaStdin(row, path, buffer);
+}
+
+function writeViaStdin(
+  row: ContainerRow,
+  path: string,
+  payload: Buffer,
+): Promise<void> {
+  return new Promise((resolveP, reject) => {
+    // `-T` disables TTY allocation so stdin is treated as a pipe. The sh -c
+    // wrapper lets us redirect stdin to the target path; single-quoting the
+    // path is safe because callers pass sanitized/controlled paths.
+    const args = [
+      "compose",
+      "-p",
+      row.project_name,
+      "-f",
+      COMPOSE_FILE,
+      "exec",
+      "-T",
+      "--user",
+      APP_USER,
+      "ai-os",
+      "sh",
+      "-c",
+      `cat > '${path}'`,
+    ];
+    const proc = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stderr = "";
+    proc.stderr.on("data", (d) => (stderr += d.toString()));
+    proc.on("error", reject);
+    proc.on("exit", (code) => {
+      if (code !== 0) reject(new Error(`write failed (exit ${code}): ${stderr}`));
+      else resolveP();
+    });
+    // Stream the payload in and close stdin so `cat` sees EOF.
+    proc.stdin.end(payload);
+  });
+}
+
+/**
+ * Removes a workspace file (no-op if missing: `rm -f`). Throws on other errors.
+ */
+export async function removeWorkspaceFile(
+  row: ContainerRow,
+  path: string,
+): Promise<void> {
+  const r = await execInContainer(row, ["rm", "-f", path], { user: APP_USER });
+  if (r.code !== 0) throw new Error(`rm failed (exit ${r.code}): ${r.stderr}`);
+}
+
+/**
+ * Ensures a workspace directory exists (`mkdir -p`). Throws on failure.
+ */
+export async function ensureWorkspaceDir(
+  row: ContainerRow,
+  path: string,
+): Promise<void> {
+  const r = await execInContainer(row, ["mkdir", "-p", path], { user: APP_USER });
+  if (r.code !== 0) throw new Error(`mkdir failed (exit ${r.code}): ${r.stderr}`);
 }

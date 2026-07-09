@@ -14,10 +14,12 @@ pipeline needs:
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
 from canva_ops import POSTS_DESIGN_TYPES, length_for_slide_count
+from brand_merge import merge_brand_for_brief, selected_assets
 
 
 @dataclass
@@ -118,7 +120,13 @@ def load_brief(path: str) -> Brief:
         platform=platform,
         aspect_ratio=aspect_ratio,
         slides=slides,
-        brand=data.get("brand") or {},
+        # Merge the lane's brand selection (from /workspace/brand/brand.json +
+        # <folder>/brand_selection.json) with any brief-local brand block.
+        # Brief-local wins per-field; see brand_merge.merge_brand_for_brief.
+        brand=merge_brand_for_brief(
+            os.path.dirname(path),
+            data.get("brand"),
+        ),
         raw=data,
     )
 
@@ -158,6 +166,30 @@ def brand_preamble(brief: Brief) -> str:
                 lines.append(f"  {role} — {family} {weight}".rstrip())
         if typo.get("fallback"):
             lines.append(f"Fallback: {typo['fallback']}")
+
+    # Selected brand assets (logos, photos, components, icons). Described here
+    # as placement guidance (Tier 1). When PUBLIC_BASE_URL is set, these are
+    # ALSO uploaded and embedded via asset_ids (Tier 2) — but the description
+    # still helps the model place them correctly.
+    assets = selected_assets(b)
+    if assets:
+        # Group by category for clear placement guidance.
+        by_cat: dict[str, list[str]] = {}
+        for a in assets:
+            cat = a.get("category", "asset")
+            label = a.get("label") or a.get("filename") or a.get("id")
+            by_cat.setdefault(cat, []).append(label)
+        cat_guidance = {
+            "logo": "Place the brand logo prominently (e.g. top-left or as a watermark). Use on every slide where it fits naturally.",
+            "photo": "Use these photos/backgrounds as full-bleed or hero imagery matching the slide's intent.",
+            "component": "Incorporate these graphic components where they reinforce the message.",
+            "icon": "Use these icons to mark callouts, lists, or key points.",
+        }
+        for cat, labels in by_cat.items():
+            guidance = cat_guidance.get(cat, "Use these brand assets where appropriate.")
+            lines.append(f"{cat.capitalize()}: {', '.join(labels)}")
+            lines.append(f"  {guidance}")
+
     if lines:
         lines.append("Preserve this identity on every slide. Vary composition for pacing; do not vary the palette or typography.")
     return "\n".join(lines)

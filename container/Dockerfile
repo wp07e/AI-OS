@@ -129,6 +129,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && uv sync --frozen --no-dev \
  && find ${LAYERRE_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
 
+# ─── Python on PATH ────────────────────────────────────────────────────────
+# uv manages its own CPython under UV_PYTHON_INSTALL_DIR (/opt/uv/python).
+# The syncs above trigger the download, but the interpreter isn't on PATH by
+# default. Symlink the baked binary so `python` / `python3` / `pip` just work.
+RUN UV_PY=$(find ${UV_PYTHON_INSTALL_DIR} -path '*/bin/python3' 2>/dev/null | sort -V | tail -1) \
+ && ln -sf "$UV_PY" /usr/local/bin/python3 \
+ && ln -sf /usr/local/bin/python3 /usr/local/bin/python
+
 #------------------------------------------
 # TODO: Workaround for OpenCode OAuth.
 # OpenCode binds its OAuth callback to 127.0.0.1:<OAUTH_PORT> regardless of the

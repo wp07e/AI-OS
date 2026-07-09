@@ -19,6 +19,9 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY}
       XAI_API_KEY: ${XAI_API_KEY}
       LAYERRE_API_KEY: ${LAYERRE_API_KEY}
+      # Public base URL for the brand-asset proxy (Tier 2 asset embedding).
+      # Empty in dev → carousel pipeline describes assets in the prompt instead.
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
       # Parametric mcp-auth ports (consumed by /usr/local/bin/mcp-auth).
       MCP_AUTH_OAUTH_PORT: ${OAUTH_PORT}
       MCP_AUTH_RELAY_PORT: ${RELAY_PORT}

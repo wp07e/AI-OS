@@ -5,7 +5,9 @@ import { db } from "@/lib/db";
 import {
   extractAssistantText,
   getOrCreateSession,
+  getOrCreateLibrarySession,
   invalidateSession,
+  invalidateLibrarySession,
   isStaleSessionError,
   listMessages,
   promptAsync,
@@ -14,6 +16,9 @@ import {
   type SessionPrime,
 } from "@/lib/opencode";
 import { getWorkflow } from "@/lib/workflows/registry";
+import { brandSessionPrime } from "@/lib/brand/prime";
+import { brandCardPreamble } from "@/lib/brand/preamble";
+import { isBrandCardKey } from "@/lib/brand/cards";
 
 export const runtime = "nodejs";
 export const maxDuration = 600;
@@ -66,36 +71,74 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "message is required" }, { status: 400 });
   }
 
+  // Two targeting modes: a workflow lane (workflowInstanceId) or a shared
+  // library (library). Each resolves to an opencode session + a one-time prime.
+  // The brand path has no workflow_instances row, so it uses the library
+  // session cache instead.
+  const library = String(body.library ?? "").trim();
   const workflowInstanceId = String(body.workflowInstanceId ?? "").trim();
-  if (!workflowInstanceId) {
-    return NextResponse.json({ error: "workflowInstanceId is required" }, { status: 400 });
-  }
 
-  const instance = db()
-    .prepare(
-      "SELECT id, workflow_type, title, folder FROM workflow_instances WHERE id = ? AND user_id = ?",
-    )
-    .get(workflowInstanceId, user.id) as
-    | { id: string; workflow_type: string; title: string; folder: string }
-    | undefined;
-  if (!instance) {
-    log("reject — instance not found", { workflowInstanceId });
-    return NextResponse.json({ error: "workflow instance not found" }, { status: 404 });
-  }
-  log("instance resolved", { type: instance.workflow_type, folder: instance.folder });
+  /** Resolves the opencode session id (creating + priming on first use). */
+  let resolveSession: () => Promise<string>;
+  /** Invalidate + retry on a stale (404) session. */
+  let invalidate: () => void;
+  /** The text actually delivered to the agent. Defaults to the raw user message;
+   *  library sessions prepend a per-card scoping preamble (hidden from the UI). */
+  let deliveredMessage = message;
 
-  // Build the one-time session prime. Sent ONLY when a new session is created
-  // (inside getOrCreateSession); no-op on a cache hit. The prime tells the agent
-  // its concrete folder AND — critically — to read the skill file before acting.
-  // Without it the agent sees "carousel" + Canva tools and shortcuts to calling
-  // them directly, ignoring the deterministic procedure. The user's real message
-  // is still forwarded CLEAN (no per-message injection).
-  const def = getWorkflow(instance.workflow_type);
-  const prime: SessionPrime = {
-    folder: instance.folder,
-    skill: def?.skill ?? instance.workflow_type,
-    sessionPrompt: def?.sessionPrompt,
-  };
+  if (library) {
+    // ── Library path (brand, …) ────────────────────────────────────────────
+    const prime = libraryPrime(library);
+    if (!prime) {
+      return NextResponse.json({ error: `unknown library '${library}'` }, { status: 400 });
+    }
+    resolveSession = () => getOrCreateLibrarySession(row, library, prime);
+    invalidate = () => invalidateLibrarySession(user.id, library);
+    // Prepend the card-specific preamble so the agent knows its exact scope +
+    // refusal rules each turn. The route filters user-message echoes from the
+    // event stream, so this stays hidden from the chat bubbles.
+    const card = String(body.card ?? "").trim();
+    const preamble = libraryPreamble(library, card);
+    if (preamble) deliveredMessage = `${preamble}\n${message}`;
+    log("target — library", { library, folder: prime.folder, card: card || null });
+  } else {
+    // ── Workflow lane path (unchanged) ─────────────────────────────────────
+    if (!workflowInstanceId) {
+      return NextResponse.json({ error: "workflowInstanceId is required" }, { status: 400 });
+    }
+    const instance = db()
+      .prepare(
+        "SELECT id, workflow_type, title, folder FROM workflow_instances WHERE id = ? AND user_id = ?",
+      )
+      .get(workflowInstanceId, user.id) as
+      | { id: string; workflow_type: string; title: string; folder: string }
+      | undefined;
+    if (!instance) {
+      log("reject — instance not found", { workflowInstanceId });
+      return NextResponse.json({ error: "workflow instance not found" }, { status: 404 });
+    }
+    log("instance resolved", { type: instance.workflow_type, folder: instance.folder });
+
+    // Silent brand-context prefill: if the lane has an active brand selection,
+    // prepend a concise summary (colors, typography, voice, selected assets) so
+    // the agent reasons WITH the brand when writing the brief + slide copy.
+    // Empty when no selection is applied → no noise. Hidden from the chat
+    // bubbles (the route filters user-message echoes from the event stream).
+    const { buildLaneBrandPrefill } = await import("@/lib/brand/lane-prefill");
+    const brandPrefill = await buildLaneBrandPrefill(row, instance.folder);
+    if (brandPrefill) deliveredMessage = `${brandPrefill}\n\n${message}`;
+
+    // Build the one-time session prime. Sent ONLY when a new session is created
+    // (inside getOrCreateSession); no-op on a cache hit.
+    const def = getWorkflow(instance.workflow_type);
+    const prime: SessionPrime = {
+      folder: instance.folder,
+      skill: def?.skill ?? instance.workflow_type,
+      sessionPrompt: def?.sessionPrompt,
+    };
+    resolveSession = () => getOrCreateSession(row, workflowInstanceId, prime);
+    invalidate = () => invalidateSession(user.id, workflowInstanceId);
+  }
 
   const encoder = new TextEncoder();
   const abort = new AbortController();
@@ -121,20 +164,27 @@ export async function POST(req: Request) {
       try {
         let sessionId: string;
         try {
-          // Prime only on the first (new-session) call. The retry below omits
-          // it: a 404-retry means the session was already primed on the first
-          // attempt; re-priming would duplicate the grounding.
-          sessionId = await getOrCreateSession(row, workflowInstanceId, prime);
-          log("getOrCreateSession — done", { sessionId });
-          await drivePrompt(row, sessionId, message, send, abort.signal, /*attempt*/ 1);
+          // resolveSession primes only on the first (new-session) call. The
+          // retry below re-resolves without a prime: a 404-retry means the
+          // session was already primed on the first attempt; re-priming would
+          // duplicate the grounding.
+          sessionId = await resolveSession();
+          log("session resolved", { sessionId });
+          await drivePrompt(row, sessionId, deliveredMessage, send, abort.signal, /*attempt*/ 1);
         } catch (err) {
           if (isStaleSessionError(err)) {
             log("session rejected (404) — invalidating + retrying");
-            invalidateSession(user.id, workflowInstanceId);
-            // No prime on retry — see note above.
-            sessionId = await getOrCreateSession(row, workflowInstanceId);
+            invalidate();
+            // No prime on retry — see note above. Re-resolve via the library
+            // path if that's the active mode, else the workflow path.
+            if (library) {
+              sessionId = await getOrCreateLibrarySession(row, library);
+            } else {
+              sessionId = await getOrCreateSession(row, workflowInstanceId);
+            }
+            log("session resolved (retry)", { sessionId });
             log("getOrCreateSession (retry) — done", { sessionId });
-            await drivePrompt(row, sessionId, message, send, abort.signal, /*attempt*/ 2);
+            await drivePrompt(row, sessionId, deliveredMessage, send, abort.signal, /*attempt*/ 2);
           } else {
             throw err;
           }
@@ -332,4 +382,23 @@ function pickLastAssistant(
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Returns the session prime for a shared library key, or null if the key isn't
+ * a known library. Currently only "brand" is supported.
+ */
+function libraryPrime(library: string): SessionPrime | null {
+  if (library === "brand") return brandSessionPrime();
+  return null;
+}
+
+/**
+ * Returns the per-card scoping preamble for a library session, or null if the
+ * library/card combo doesn't have one (e.g. unknown card). Used to prepend
+ * hidden context to each brand message so the agent knows its exact scope.
+ */
+function libraryPreamble(library: string, card: string): string | null {
+  if (library === "brand" && isBrandCardKey(card)) return brandCardPreamble(card);
+  return null;
 }

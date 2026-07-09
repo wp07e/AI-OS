@@ -3,9 +3,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
- * Agent chat state + send logic, keyed on a workflow instance. Extracted from
- * AgentPanel so any canvas can trigger a templated message (chat-trigger
- * buttons) without owning the transport.
+ * Agent chat state + send logic, keyed on an opaque "session key". Extracted
+ * from AgentPanel so any canvas (or the Brand library) can trigger a templated
+ * message without owning the transport.
+ *
+ * The session key is an opaque string that uniquely identifies a chat context:
+ *   - a workflow lane  → "lane:<instanceId>" (or historically just the id)
+ *   - a shared library → "brand"
+ * Whatever the key is, its message history + streaming slot live in a per-key
+ * map, so switching contexts switches the active view without losing state.
+ *
+ * `transport` tells `send` how to address the server. The server route accepts
+ * either `workflowInstanceId` (lanes) or `library` (libraries); the hook stays
+ * domain-agnostic by taking the payload key/value verbatim.
  *
  * Transport: SSE. `send` POSTs to /api/tools/message, which streams back events:
  *   delta   → append to the streaming assistant reply bubble
@@ -13,10 +23,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
  *   tool    → status chip in the reasoning panel ("Generating image…")
  *   done    → finalize the assistant message from authoritative text; clear stream
  *   error   → surface + clear stream
- *
- * Per-lane state: each workflow instance gets its own message history and
- * streaming slot, keyed by instance id in maps. Switching lanes switches the
- * active view without losing the other lane's state.
  */
 
 export interface ToolResponse {
@@ -39,7 +45,7 @@ export interface ChatMessage {
   streaming?: boolean;
 }
 
-/** Live streaming state for a lane — rendered in the stationary thinking panel. */
+/** Live streaming state for a session — rendered in the stationary thinking panel. */
 export interface StreamingState {
   assistantId: number;
   /** Most recent reasoning text (replaces prior; full text, not deltas). */
@@ -52,61 +58,84 @@ export interface AgentChat {
   messages: ChatMessage[];
   busy: boolean;
   error: string | null;
-  /** Non-null while an assistant response is streaming in for the active lane. */
+  /** Non-null while an assistant response is streaming in for the active session. */
   streaming: StreamingState | null;
-  /** Send a message to the active lane's session. No-op if no lane or busy. */
+  /** Send a message to the active session. No-op if no session or busy. */
   send: (text: string) => Promise<void>;
-  /** Clear visible history + error (called on lane switch). */
+  /** Clear ALL session history + error (nuclear; resets every chat context). */
   reset: () => void;
+  /** Clear history + error for ONE session key only, leaving other contexts
+   *  intact. Use when navigating within a context family (e.g. closing a brand
+   *  card) so the next Ask AI starts fresh without wiping lane histories. */
+  clearSession: (key: string) => void;
 }
 
-type LaneMap<T> = Record<string, T>;
+/**
+ * Describes how a `send` is addressed on the wire. The payload is merged into
+ * the POST body alongside `{ message }`. Callers pass exactly one targeting
+ * field, e.g. `{ key: "workflowInstanceId", value: instanceId }` or
+ * `{ key: "library", value: "brand" }`.
+ *
+ * `card` is optional context for library sessions (e.g. which Brand Kit card is
+ * open) so the server can scope the agent per-card. Ignored by lane transports.
+ */
+export interface ChatTransport {
+  key: string;
+  value: string;
+  card?: string;
+}
 
-export function useAgentChat(workflowInstanceId: string | null): AgentChat {
-  const [messagesByLane, setMessagesByLane] = useState<LaneMap<ChatMessage[]>>({});
-  const [errorByLane, setErrorByLane] = useState<LaneMap<string | null>>({});
-  const [streamingByLane, setStreamingByLane] = useState<LaneMap<StreamingState>>({});
+type SessionMap<T> = Record<string, T>;
+
+export function useAgentChat(sessionKey: string | null, transport: ChatTransport | null): AgentChat {
+  const [messagesBySession, setMessagesBySession] = useState<SessionMap<ChatMessage[]>>({});
+  const [errorBySession, setErrorBySession] = useState<SessionMap<string | null>>({});
+  const [streamingBySession, setStreamingBySession] = useState<SessionMap<StreamingState>>({});
   const [busy, setBusy] = useState(false);
 
-  const laneKey = workflowInstanceId ?? "__none__";
-  const messages = workflowInstanceId ? (messagesByLane[laneKey] ?? []) : [];
-  const error = workflowInstanceId ? (errorByLane[laneKey] ?? null) : null;
-  const streaming = workflowInstanceId ? (streamingByLane[laneKey] ?? null) : null;
+  const key = sessionKey ?? "__none__";
+  const messages = sessionKey ? (messagesBySession[key] ?? []) : [];
+  const error = sessionKey ? (errorBySession[key] ?? null) : null;
+  const streaming = sessionKey ? (streamingBySession[key] ?? null) : null;
 
-  // Hold the latest instance id + busy flag in refs updated during the commit
-  // phase (effects), so `send` — which is stable (empty deps) — can read the
-  // current values without going stale and without re-creating on every render.
-  const instanceRef = useRef(workflowInstanceId);
+  // Hold the latest session key + transport + busy flag in refs updated during
+  // the commit phase (effects), so `send` — which is stable (empty deps) — can
+  // read the current values without going stale and without re-creating.
+  const sessionRef = useRef(sessionKey);
+  const transportRef = useRef(transport);
   const busyRef = useRef(false);
   useEffect(() => {
-    instanceRef.current = workflowInstanceId;
-  }, [workflowInstanceId]);
+    sessionRef.current = sessionKey;
+  }, [sessionKey]);
+  useEffect(() => {
+    transportRef.current = transport;
+  }, [transport]);
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
 
-  /** Parses the SSE response body and dispatches each frame to the lane state. */
+  /** Parses the SSE response body and dispatches each frame to the session state. */
   const consumeStream = useCallback(
-    async (body: ReadableStream<Uint8Array>, key: string, assistantId: number) => {
+    async (body: ReadableStream<Uint8Array>, sKey: string, assistantId: number) => {
       const reader = body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
       let reasoningAccum = "";
 
       const updateAssistant = (fn: (m: ChatMessage) => ChatMessage) => {
-        setMessagesByLane((m) => ({
+        setMessagesBySession((m) => ({
           ...m,
-          [key]: (m[key] ?? []).map((msg) => (msg.id === assistantId ? fn(msg) : msg)),
+          [sKey]: (m[sKey] ?? []).map((msg) => (msg.id === assistantId ? fn(msg) : msg)),
         }));
       };
       const setStreaming = (s: StreamingState | null) => {
-        setStreamingByLane((m) => {
+        setStreamingBySession((m) => {
           if (!s) {
             const n = { ...m };
-            delete n[key];
+            delete n[sKey];
             return n;
           }
-          return { ...m, [key]: s };
+          return { ...m, [sKey]: s };
         });
       };
 
@@ -153,7 +182,7 @@ export function useAgentChat(workflowInstanceId: string | null): AgentChat {
             setStreaming(null);
           } else if (type === "error") {
             const msg = (evt.message as string) ?? "stream error";
-            setErrorByLane((m) => ({ ...m, [key]: msg }));
+            setErrorBySession((m) => ({ ...m, [sKey]: msg }));
             updateAssistant((m) => ({ ...m, streaming: false, content: m.content || "(error)" }));
             setStreaming(null);
           }
@@ -165,47 +194,47 @@ export function useAgentChat(workflowInstanceId: string | null): AgentChat {
 
   const send = useCallback(async (text: string) => {
     const trimmed = text.trim();
-    const instanceId = instanceRef.current;
-    if (!trimmed || !instanceId || busyRef.current) return;
+    const sKey = sessionRef.current;
+    const tport = transportRef.current;
+    if (!trimmed || !sKey || !tport || busyRef.current) return;
     busyRef.current = true;
     setBusy(true);
-    const key = instanceId;
-    setErrorByLane((m) => ({ ...m, [key]: null }));
+    setErrorBySession((m) => ({ ...m, [sKey]: null }));
 
     const userMsg: ChatMessage = { id: Date.now(), role: "user", content: trimmed };
     const assistantId = Date.now() + 1;
     const assistantMsg: ChatMessage = { id: assistantId, role: "assistant", content: "", streaming: true };
-    setMessagesByLane((m) => ({ ...m, [key]: [...(m[key] ?? []), userMsg, assistantMsg] }));
-    setStreamingByLane((m) => ({ ...m, [key]: { assistantId, reasoningText: "" } }));
+    setMessagesBySession((m) => ({ ...m, [sKey]: [...(m[sKey] ?? []), userMsg, assistantMsg] }));
+    setStreamingBySession((m) => ({ ...m, [sKey]: { assistantId, reasoningText: "" } }));
 
     try {
+      const payload: Record<string, string> = { message: trimmed, [tport.key]: tport.value };
+      if (tport.card) payload.card = tport.card;
       const res = await fetch("/api/tools/message", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed, workflowInstanceId: instanceId }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok || !res.body) {
         const data = (await res.json().catch(() => ({}))) as ToolResponse;
         const msg = data.error ?? `Request failed (${res.status})`;
         throw new Error(data.detail ? `${msg} — ${data.detail}` : msg);
       }
-      await consumeStream(res.body, key, assistantId);
+      await consumeStream(res.body, sKey, assistantId);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setErrorByLane((m) => ({ ...m, [key]: msg }));
-      // Mark the streaming assistant message as no longer streaming so it stops
-      // showing the typing indicator.
-      setMessagesByLane((m) => ({
+      setErrorBySession((m) => ({ ...m, [sKey]: msg }));
+      setMessagesBySession((m) => ({
         ...m,
-        [key]: (m[key] ?? []).map((msg2) =>
+        [sKey]: (m[sKey] ?? []).map((msg2) =>
           msg2.id === assistantId ? { ...msg2, streaming: false, content: msg2.content || "(no response)" } : msg2,
         ),
       }));
     } finally {
-      setStreamingByLane((m) => {
-        if (!m[key]) return m;
+      setStreamingBySession((m) => {
+        if (!m[sKey]) return m;
         const next = { ...m };
-        delete next[key];
+        delete next[sKey];
         return next;
       });
       busyRef.current = false;
@@ -214,10 +243,31 @@ export function useAgentChat(workflowInstanceId: string | null): AgentChat {
   }, [consumeStream]);
 
   const reset = useCallback(() => {
-    setMessagesByLane({});
-    setErrorByLane({});
-    setStreamingByLane({});
+    setMessagesBySession({});
+    setErrorBySession({});
+    setStreamingBySession({});
   }, []);
 
-  return { messages, busy, error, streaming, send, reset };
+  const clearSession = useCallback((sKey: string) => {
+    setMessagesBySession((m) => {
+      if (!m[sKey]) return m;
+      const next = { ...m };
+      delete next[sKey];
+      return next;
+    });
+    setErrorBySession((m) => {
+      if (!m[sKey]) return m;
+      const next = { ...m };
+      delete next[sKey];
+      return next;
+    });
+    setStreamingBySession((m) => {
+      if (!m[sKey]) return m;
+      const next = { ...m };
+      delete next[sKey];
+      return next;
+    });
+  }, []);
+
+  return { messages, busy, error, streaming, send, reset, clearSession };
 }

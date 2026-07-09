@@ -62,6 +62,13 @@ Fill in the values from the user's request; do not invent extra fields or
 change the key names. The pipeline script parses this file and will reject a
 malformed brief.
 
+**Do NOT include a `brand` block.** Brand identity (colors, typography, voice,
+logos) is auto-applied from the user's Brand Kit based on the lane's brand
+selection (`brand_selection.json` in the instance folder). You do not need to
+specify colors or fonts — if the user has selected brand elements for this
+lane, the pipeline bakes them into the design prompt automatically. Only add a
+`brand` block if the user gives explicit per-carousel overrides.
+
 ```json
 {
   "deck_id": "<lowercase-hyphen-id>",

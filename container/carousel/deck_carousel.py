@@ -21,6 +21,7 @@ import os
 
 from brief import Brief, brand_preamble
 from canva_ops import McpClient, generate_design, create_from_candidate, get_design_pages
+from brand_merge import resolve_asset_ids
 from export_util import export_and_save
 from state import write_state, append_error, slide_state, candidate_state
 
@@ -52,6 +53,9 @@ def run_deck_to_candidates(
         brief={"topic": brief.title, "aspect_ratio": brief.aspect_ratio, "slide_count": len(brief.slides), "platform": brief.platform},
         slides=slides_state,
     )
+    # Tier 2: upload selected brand assets (when PUBLIC_BASE_URL set) so the
+    # generated deck embeds them. Empty list in dev (Tier 1 describe-only).
+    asset_ids = resolve_asset_ids(instance_folder, client)
     write_state(instance_folder, "generating_design", mode=brief.mode, slides=slides_state)
 
     gen = generate_design(
@@ -59,6 +63,7 @@ def run_deck_to_candidates(
         query=query,
         design_type=brief.design_type,
         length=brief.length,
+        asset_ids=asset_ids or None,
     )
 
     # Surface all candidates with their first-slide thumbnail for the picker.

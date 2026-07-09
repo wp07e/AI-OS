@@ -192,6 +192,28 @@ def generate_design(
     return GeneratedDesign(job_id=job_id, candidates=candidates)
 
 
+def upload_asset_from_url(
+    client: McpClient,
+    url: str,
+    name: str,
+) -> str:
+    """Upload an image into the user's Canva media library and return its asset_id.
+
+    Used for Tier 2 brand-asset embedding: brand logos/photos/components/icons
+    are uploaded once, then their asset_ids are passed to generate-design so
+    Canva embeds the real files. The URL must be publicly reachable by Canva's
+    servers (provided by the host's signed asset proxy when PUBLIC_BASE_URL set).
+
+    Raises McpError on any failure. Returns the asset_id.
+    """
+    resp = client.call_tool("upload-asset-from-url", {"url": url, "name": name})
+    asset = (resp or {}).get("asset") or {}
+    asset_id = asset.get("id")
+    if not asset_id:
+        raise McpError(f"upload-asset-from-url returned no asset id: {resp}")
+    return asset_id
+
+
 def create_from_candidate(
     client: McpClient,
     job_id: str,

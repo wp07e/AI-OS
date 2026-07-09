@@ -378,19 +378,17 @@ export async function getOrCreateSession(
  */
 function buildPrimeMessage(prime: SessionPrime): string {
   const lines = [
-    `You are now working in an instance of the ${prime.skill} workflow.`,
+    `You are now working in the ${prime.skill} context.`,
     ``,
-    `Your instance folder is ${prime.folder}.`,
+    `Your working folder is ${prime.folder}.`,
     ``,
-    `BEFORE doing anything else, read these two files:`,
-    `  1. ${prime.folder}/AGENTS.md  — names this instance concretely.`,
-    `  2. /workspace/skills/${prime.skill}/SKILL.md  — the procedure you MUST follow.`,
+    `BEFORE doing anything else, read the skill file:`,
+    `  /workspace/skills/${prime.skill}/SKILL.md  — the procedure you MUST follow.`,
+    `Also read ${prime.folder}/AGENTS.md if it exists.`,
     ``,
-    `Follow the SKILL.md procedure exactly. For generation, it tells you to write`,
-    `brief.json and run a deterministic script — do NOT call Canva generation tools`,
-    `(generate-design, create-design-from-candidate, export-design) yourself; the`,
-    `script owns those. You are in autonomous mode (no interactive terminal), so`,
-    `operate end-to-end without stopping to ask the user questions.`,
+    `Follow the SKILL.md procedure exactly. You are in autonomous mode (no`,
+    `interactive terminal), so operate end-to-end without stopping to ask the`,
+    `user questions.`,
   ];
   if (prime.sessionPrompt) {
     lines.push(``, prime.sessionPrompt);
@@ -404,4 +402,63 @@ export function invalidateSession(userId: number, workflowInstanceId: string): v
   db()
     .prepare("DELETE FROM opencode_sessions WHERE user_id = ? AND workflow_instance_id = ?")
     .run(userId, workflowInstanceId);
+}
+
+// ─── Per-(user, library) session caching ────────────────────────────────────
+//
+// Shared libraries (brand, templates, ...) also need a persistent opencode
+// session, but they aren't workflow_instances — so they can't share the
+// opencode_sessions table (its workflow_instance_id has a FK to
+// workflow_instances). library_sessions mirrors that table keyed on
+// (user_id, library_key) instead, with the same container-id invalidation rule.
+
+/**
+ * Returns a usable opencode session id for the given library, creating +
+ * caching one if needed. Reuses the cached session only if the container
+ * hasn't changed (same port AND container_id). Prime is sent once on creation.
+ */
+export async function getOrCreateLibrarySession(
+  row: ContainerRow,
+  libraryKey: string,
+  prime?: SessionPrime,
+): Promise<string> {
+  const cached = db()
+    .prepare("SELECT * FROM library_sessions WHERE user_id = ? AND library_key = ?")
+    .get(row.user_id, libraryKey) as CachedSession | undefined;
+
+  if (cached && cached.opencode_port === row.opencode_port && cached.container_id === row.container_id) {
+    return cached.session_id;
+  }
+
+  const sessionId = await createSession(row.opencode_port);
+  db()
+    .prepare(
+      `INSERT INTO library_sessions (user_id, library_key, session_id, opencode_port, container_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, library_key) DO UPDATE SET
+         session_id = excluded.session_id,
+         opencode_port = excluded.opencode_port,
+         container_id = excluded.container_id,
+         created_at = excluded.created_at`,
+    )
+    .run(row.user_id, libraryKey, sessionId, row.opencode_port, row.container_id, Date.now());
+
+  if (prime) {
+    const text = buildPrimeMessage(prime);
+    console.log(`[opencode] priming library session ${sessionId} for ${libraryKey} (folder: ${prime.folder})`);
+    try {
+      await sendMessage(row.opencode_port, sessionId, text);
+    } catch (err) {
+      console.error(`[opencode] library prime failed (non-fatal):`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  return sessionId;
+}
+
+/** Clears the cached session for a library (e.g. if the server rejects it). */
+export function invalidateLibrarySession(userId: number, libraryKey: string): void {
+  db()
+    .prepare("DELETE FROM library_sessions WHERE user_id = ? AND library_key = ?")
+    .run(userId, libraryKey);
 }

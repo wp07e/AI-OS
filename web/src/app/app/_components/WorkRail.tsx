@@ -9,8 +9,16 @@ import type { WorkflowInstance } from "./AppShell";
 interface Props {
   instances: WorkflowInstance[];
   activeId: string | null;
+  /** Active library key ("brand") or null when a lane/empty is active. */
+  activeLibrary: string | null;
+  /** instanceId → true when a brand selection is applied (for the badge). */
+  brandApplied: Record<string, boolean>;
   loading: boolean;
   onSelect: (id: string) => void;
+  /** Selects a shared library view (clears the active lane). null = none. */
+  onSelectLibrary: (key: string | null) => void;
+  /** Opens the per-lane brand wizard for an instance. */
+  onOpenBrandWizard: (inst: WorkflowInstance) => void;
   onRefresh: () => void;
 }
 
@@ -25,7 +33,7 @@ interface Props {
  * their create + open buttons are disabled and an inline note points at the
  * "Connect Canva" affordance in the header (see CanvaStatusProvider).
  */
-export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: Props) {
+export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loading, onSelect, onSelectLibrary, onOpenBrandWizard, onRefresh }: Props) {
   const { connected, loading: canvaLoading } = useCanvaStatus();
   // Block only on a confirmed disconnect; while the probe is in flight the
   // buttons stay enabled so connected users never see a gate flicker.
@@ -171,30 +179,48 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
                               }
                             >
                               <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current opacity-60" />
-                              <span className="flex-1 truncate pr-12">{inst.title}</span>
+                              <span className="flex-1 truncate pr-20">{inst.title}</span>
                             </button>
                             {!blocked && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (deletingId !== null) return;
-                                  deleteWorkflow(inst);
-                                }}
-                                disabled={deletingId !== null}
-                                title={
-                                  deletingId === inst.id
-                                    ? "Deleting…"
-                                    : `Delete "${inst.title}"`
-                                }
-                                aria-label={`Delete ${inst.title}`}
-                                className="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-0 transition hover:bg-red-500/15 hover:text-red-300 focus-visible:opacity-100 disabled:cursor-wait group-hover:opacity-100"
-                              >
-                                {deletingId === inst.id ? (
-                                  <SpinnerIcon />
-                                ) : (
-                                  <TrashIcon />
-                                )}
-                              </button>
+                              <>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onOpenBrandWizard(inst);
+                                  }}
+                                  title="Brand for this carousel"
+                                  aria-label={`Brand settings for ${inst.title}`}
+                                  className={
+                                    "absolute right-8 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded transition group-hover:opacity-100 " +
+                                    (brandApplied[inst.id]
+                                      ? "opacity-100 text-indigo-300 hover:bg-indigo-500/15"
+                                      : "text-[var(--muted)] opacity-0 hover:bg-white/5 hover:text-[var(--foreground)] focus-visible:opacity-100")
+                                  }
+                                >
+                                  <BrandSwatchIcon active={!!brandApplied[inst.id]} />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (deletingId !== null) return;
+                                    deleteWorkflow(inst);
+                                  }}
+                                  disabled={deletingId !== null}
+                                  title={
+                                    deletingId === inst.id
+                                      ? "Deleting…"
+                                      : `Delete "${inst.title}"`
+                                  }
+                                  aria-label={`Delete ${inst.title}`}
+                                  className="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-0 transition hover:bg-red-500/15 hover:text-red-300 focus-visible:opacity-100 disabled:cursor-wait group-hover:opacity-100"
+                                >
+                                  {deletingId === inst.id ? (
+                                    <SpinnerIcon />
+                                  ) : (
+                                    <TrashIcon />
+                                  )}
+                                </button>
+                              </>
                             )}
                           </div>
                         );
@@ -250,8 +276,13 @@ export function WorkRail({ instances, activeId, loading, onSelect, onRefresh }: 
         </p>
         <div className="mt-1 flex flex-col gap-0.5">
           <button
-            disabled
-            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm text-[var(--muted)] opacity-50"
+            onClick={() => onSelectLibrary("brand")}
+            className={
+              "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition " +
+              (activeLibrary === "brand"
+                ? "bg-indigo-500/15 text-indigo-200"
+                : "text-[var(--foreground)]/80 hover:bg-white/5")
+            }
           >
             <BrandIcon />
             <span>Brand</span>
@@ -314,6 +345,19 @@ function TrashIcon() {
       <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
       <path d="M10 11v6M14 11v6" />
       <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+    </svg>
+  );
+}
+
+/** Palette/swatch icon for the per-lane brand button. Filled when a selection
+ *  is applied (badge effect), outlined otherwise. */
+function BrandSwatchIcon({ active }: { active: boolean }) {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill={active ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.65-.75 1.65-1.69 0-.43-.18-.83-.44-1.12-.29-.29-.44-.65-.44-1.12a1.64 1.64 0 0 1 1.67-1.67H16c3.05 0 5.55-2.5 5.55-5.55C22 6 17.5 2 12 2z" />
+      <circle cx="7.5" cy="11.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none" />
+      <circle cx="16.5" cy="11.5" r="1" fill="currentColor" stroke="none" />
     </svg>
   );
 }

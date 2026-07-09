@@ -18,6 +18,15 @@ const COOKIE_NAME = "aios_session";
  */
 const SECRET = resolveSessionSecret();
 
+/**
+ * The session signing secret. Exposed so other token systems (e.g. public
+ * asset-proxy tokens) can reuse the same stable secret rather than minting
+ * their own. MUST be stable across restarts (handled by resolveSessionSecret).
+ */
+export function getAuthSecret(): string {
+  return SECRET;
+}
+
 function resolveSessionSecret(): string {
   const fromEnv = process.env.AIOS_SESSION_SECRET;
   if (fromEnv) return fromEnv;

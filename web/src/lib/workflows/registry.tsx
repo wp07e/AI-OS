@@ -58,6 +58,7 @@ const carouselDefinition: WorkflowDefinition<CarouselState> = {
   useState: useCarouselState,
   sessionPrompt: [
     "You are working in the Carousel Studio workflow.",
+    "For generation, the SKILL.md tells you to write brief.json and run a deterministic script — do NOT call Canva generation tools (generate-design, create-design-from-candidate, export-design) yourself; the script owns those.",
     "Before acting, read memory.md and state.json in the instance folder if they exist, to pick up where a previous session left off.",
     "When you reach a meaningful milestone (starting a phase, finishing a step, hitting an error), update state.json with at least: {\"phase\": \"<current-phase>\", \"lastUpdated\": \"<ISO timestamp>\", \"errors\": [<any issues>]}.",
     "Keep state.json enriched with the workflow fields the canvas reads: brief {topic, aspect_ratio, slide_count}, slides[] (index, headline, body, cta, archetype), and design {design_id, canva_url} once known.",

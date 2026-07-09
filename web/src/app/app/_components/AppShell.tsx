@@ -4,10 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import { AgentPanel } from "./AgentPanel";
 import { WorkRail } from "./WorkRail";
 import { PhasePill } from "./PhasePill";
+import { BrandStudio } from "../(library)/brand/BrandStudio";
+import { BrandWizard } from "../(workflow)/carousel/BrandWizard";
 import { getWorkflow } from "@/lib/workflows/registry";
 import type { WorkflowState } from "@/lib/workflows/types";
-import { useAgentChat } from "@/lib/hooks/useAgentChat";
+import { useAgentChat, type ChatTransport } from "@/lib/hooks/useAgentChat";
 import { AgentChatContext } from "@/lib/hooks/AgentChatContext";
+import type { BrandCardKey } from "@/lib/brand/cards";
 
 /**
  * Workflow instance row (mirrors the workflow_instances table shape; fetched
@@ -34,6 +37,7 @@ export interface WorkflowInstance {
 export function AppShell() {
   const [instances, setInstances] = useState<WorkflowInstance[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [activeLibrary, setActiveLibrary] = useState<string | null>(null);
   const [loadingInstances, setLoadingInstances] = useState(true);
 
   const refreshInstances = useCallback(async () => {
@@ -64,13 +68,92 @@ export function AppShell() {
     refreshInstances();
   }, [refreshInstances]);
 
+  // Per-lane brand-selection state: which lanes have a brand applied (for the
+  // WorkRail badge), and which lane's wizard is open. Refreshed after the
+  // wizard saves so badges update live.
+  const [brandApplied, setBrandApplied] = useState<Record<string, boolean>>({});
+  const [brandWizardInstance, setBrandWizardInstance] = useState<WorkflowInstance | null>(null);
+
+  const refreshBrandApplied = useCallback(async () => {
+    try {
+      // One request per instance is fine for the MVP instance counts; each just
+      // reads a small JSON from the container.
+      const results = await Promise.all(
+        instances.map(async (inst) => {
+          const res = await fetch(`/api/workflows/${inst.id}/brand-selection`, {
+            cache: "no-store",
+          });
+          if (!res.ok) return [inst.id, false] as const;
+          const data = (await res.json()) as { selection: { enabled: boolean } };
+          return [inst.id, !!data.selection?.enabled] as const;
+        }),
+      );
+      setBrandApplied(Object.fromEntries(results));
+    } catch {
+      // Non-fatal — badges just won't show.
+    }
+  }, [instances]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    refreshBrandApplied();
+  }, [refreshBrandApplied]);
+
   const active = instances.find((i) => i.id === activeId) ?? null;
 
-  // One chat per active lane. Keyed on the active instance id; the hook resets
-  // visible history on lane switch. Provided via context so any canvas can
-  // trigger templated messages (chat-trigger buttons) without going through the
-  // CanvasProps contract.
-  const chat = useAgentChat(active?.id ?? null);
+  // Selecting a lane or a library is mutually exclusive: only one center-pane
+  // view is active at a time. Each handler clears the other so the UI never
+  // shows two "active" selections. Switching away from Brand also deactivates
+  // the brand AI panel (it's invite-only — re-activated by clicking Ask AI).
+  const [aiActivated, setAiActivated] = useState(false);
+  const [activeBrandCard, setActiveBrandCard] = useState<BrandCardKey | null>(null);
+
+  const selectInstance = useCallback((id: string) => {
+    setActiveLibrary(null);
+    setActiveId(id);
+    setAiActivated(false);
+    // Auto-close the brand wizard on lane switch so a stale A-context modal
+    // never lingers over a newly-selected lane B.
+    setBrandWizardInstance(null);
+  }, []);
+  const selectLibrary = useCallback((key: string | null) => {
+    if (key) setActiveId(null);
+    setActiveLibrary(key);
+    setAiActivated(false);
+    setBrandWizardInstance(null);
+  }, []);
+
+  // The agent chat targets either a workflow lane or the brand library. The
+  // session key uniquely identifies the chat context (so each keeps its own
+  // history); the transport tells the server how to address it. For brand, the
+  // transport also carries the open card so the server can scope the agent.
+  const sessionKey = activeLibrary === "brand"
+    ? "brand"
+    : active ? `lane:${active.id}` : null;
+  const transport: ChatTransport | null = activeLibrary === "brand"
+    ? { key: "library", value: "brand", card: activeBrandCard ?? undefined }
+    : active ? { key: "workflowInstanceId", value: active.id } : null;
+  const chat = useAgentChat(sessionKey, transport);
+
+  // Ask AI on a brand card: activate the panel (no input seeding — the user
+  // types or clicks an example chip). The card context reaches the agent via
+  // the hidden server-side preamble, not via a visible message.
+  const handleAskAI = useCallback((card: BrandCardKey) => {
+    setActiveBrandCard(card);
+    setAiActivated(true);
+  }, []);
+
+  // When the open card changes, keep the transport's card context in sync.
+  // Going back to the grid (card → null) also clears the brand chat and
+  // deactivates the panel, so the next card's Ask AI starts fresh (new examples,
+  // new per-card preamble, no stale history).
+  const handleBrandCardChange = useCallback((card: BrandCardKey | null) => {
+    setActiveBrandCard(card);
+    if (card === null) {
+      chat.clearSession("brand");
+      setAiActivated(false);
+    }
+  }, [chat]);
 
   return (
     <AgentChatContext.Provider value={chat}>
@@ -78,20 +161,45 @@ export function AppShell() {
         <WorkRail
           instances={instances}
           activeId={activeId}
-          onSelect={setActiveId}
+          activeLibrary={activeLibrary}
+          brandApplied={brandApplied}
+          onSelect={selectInstance}
+          onSelectLibrary={selectLibrary}
+          onOpenBrandWizard={(inst) => setBrandWizardInstance(inst)}
           onRefresh={refreshInstances}
           loading={loadingInstances}
         />
 
         <section className="flex min-w-0 flex-col overflow-hidden border-x border-white/10">
-          {active ? <CanvasArea instance={active} /> : <EmptyCanvas />}
+          {activeLibrary === "brand" ? (
+            <BrandStudio onAskAI={handleAskAI} onCardChange={handleBrandCardChange} />
+          ) : active ? (
+            <CanvasArea instance={active} />
+          ) : (
+            <EmptyCanvas />
+          )}
         </section>
 
         <AgentPanel
           workflowInstanceId={active?.id ?? null}
           workflowType={active?.workflow_type ?? null}
+          activeLibrary={activeLibrary}
+          activeBrandCard={activeBrandCard}
+          aiActivated={aiActivated}
         />
       </div>
+
+      {/* Per-lane brand wizard modal. Rendered at the shell level so it overlays
+          whatever center pane is active (lane stays visible underneath). */}
+      {brandWizardInstance && (
+        <BrandWizard
+          instanceId={brandWizardInstance.id}
+          onClose={() => setBrandWizardInstance(null)}
+          onSaved={() => {
+            refreshBrandApplied();
+          }}
+        />
+      )}
     </AgentChatContext.Provider>
   );
 }

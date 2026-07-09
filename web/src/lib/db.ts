@@ -72,6 +72,22 @@ function migrate(conn: Database.Database) {
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    -- Cached opencode session id for shared LIBRARIES (brand, templates, ...),
+    -- keyed by (user, library_key). Separate from opencode_sessions because that
+    -- table's workflow_instance_id has a FK to workflow_instances — libraries
+    -- aren't instances, so a sentinel key would violate the FK. Same invalidation
+    -- rules apply: reuse only if port AND container_id match.
+    CREATE TABLE IF NOT EXISTS library_sessions (
+      user_id       INTEGER NOT NULL,
+      library_key   TEXT    NOT NULL,
+      session_id    TEXT    NOT NULL,
+      opencode_port INTEGER NOT NULL,
+      container_id  TEXT,
+      created_at    INTEGER NOT NULL,
+      PRIMARY KEY (user_id, library_key),
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+
     -- Cached opencode session id, keyed by (user, workflow_instance). One
     -- OpenCode process per user container serves many sessions on one port; the
     -- session id is what gives each workflow lane its own bounded context.

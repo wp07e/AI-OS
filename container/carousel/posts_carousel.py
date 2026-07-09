@@ -15,6 +15,7 @@ import os
 
 from brief import Brief, SlideBrief, brand_preamble
 from canva_ops import Candidate, CreatedDesign, McpClient, generate_design, create_from_candidate
+from brand_merge import resolve_asset_ids
 from export_util import export_and_save
 from state import write_state, slide_state
 
@@ -52,9 +53,11 @@ def run_posts(
     )
 
     write_state(instance_folder, "resolving_assets", mode=brief.mode, slides=slides_state)
-    # (Asset resolution via Grok is deferred — Phase 2 of the skill. For now
-    # Canva picks stock imagery for null image directives. The skill documents
-    # this; a future enhancement adds grok.generate_image + upload-asset-from-url.)
+    # Tier 2: when PUBLIC_BASE_URL is set, upload selected brand assets to
+    # Canva once and pass their asset_ids to every generate-design call so
+    # they're really embedded. When unset, returns [] (Tier 1 describe-only —
+    # the preamble's text guidance still applies, Canva picks stock).
+    asset_ids = resolve_asset_ids(instance_folder, client)
     write_state(instance_folder, "assets_resolved", mode=brief.mode, slides=slides_state)
 
     write_state(instance_folder, "generating_design", mode=brief.mode, slides=slides_state)
@@ -63,7 +66,12 @@ def run_posts(
     collection_design: dict | None = None
     for i, slide in enumerate(brief.slides):
         query = _build_slide_query(preamble, slide, brief)
-        gen = generate_design(client, query=query, design_type=brief.design_type)
+        gen = generate_design(
+            client,
+            query=query,
+            design_type=brief.design_type,
+            asset_ids=asset_ids or None,
+        )
         # Deterministic pick: first candidate.
         chosen = gen.candidates[0]
         created = create_from_candidate(client, job_id=gen.job_id, candidate_id=chosen.candidate_id)
