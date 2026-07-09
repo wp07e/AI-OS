@@ -23,6 +23,53 @@ import json
 import os
 import sys
 import traceback
+from datetime import datetime, timezone
+
+
+class _Tee:
+    """Mirrors a stream (stdout/stderr) to a second file while keeping the
+    original destination. Used to capture the pipeline's print() output to
+    <instance>/pipeline.log, since opencode captures the script's stdout when
+    it runs via a tool call (so docker logs never sees it). pipeline.log makes
+    the output durably inspectable after a run.
+    """
+
+    def __init__(self, primary, log_file):
+        self.primary = primary
+        self.log_file = log_file
+
+    def write(self, data):
+        try:
+            self.log_file.write(data)
+            self.log_file.flush()
+        except Exception:
+            pass
+        return self.primary.write(data)
+
+    def flush(self):
+        try:
+            self.log_file.flush()
+        except Exception:
+            pass
+        return self.primary.flush()
+
+    def isatty(self):
+        return getattr(self.primary, "isatty", lambda: False)()
+
+
+def _install_pipeline_log(instance_folder: str):
+    """Tee stdout+stderr to <instance>/pipeline.log. Returns nothing; safe-noop
+    if the log can't be opened. Each run is delineated by a timestamp header."""
+    try:
+        log_path = os.path.join(instance_folder, "pipeline.log")
+        log_file = open(log_path, "a", encoding="utf-8")  # noqa: SIM115 — kept open for run lifetime
+        header = f"\n===== pipeline run {datetime.now(timezone.utc).isoformat()} =====\n"
+        log_file.write(header)
+        sys.stdout = _Tee(sys.stdout, log_file)  # type: ignore[assignment]
+        sys.stderr = _Tee(sys.stderr, log_file)  # type: ignore[assignment]
+    except Exception as exc:
+        # Logging is best-effort — never block a generation over it.
+        print(f"[run] could not open pipeline.log: {exc}", file=sys.__stderr__)
 
 # Allow running both from /app/carousel (image) and /workspace (dev copy).
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +97,11 @@ def main(argv: list[str]) -> int:
     if not os.path.isdir(instance_folder):
         print(f"instance folder not found: {instance_folder}", file=sys.stderr)
         return 1
+
+    # Tee pipeline output to <instance>/pipeline.log so it's inspectable after a
+    # run (opencode captures stdout when it runs us via a tool call, hiding it
+    # from docker logs; the log file makes it durable + debuggable).
+    _install_pipeline_log(instance_folder)
 
     brief_path = os.path.join(instance_folder, "brief.json")
     if not os.path.isfile(brief_path):

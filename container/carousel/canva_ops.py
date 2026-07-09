@@ -209,7 +209,10 @@ def upload_asset_from_url(
     print(f"[canva] upload-asset-from-url: url={url[:90]} name={name}")
     resp = client.call_tool("upload-asset-from-url", {"url": url, "name": name})
     print(f"[canva] upload-asset-from-url: response={str(resp)[:300]}")
-    asset = (resp or {}).get("asset") or {}
+    # The asset may be nested under `job.asset` (observed Canva response shape)
+    # or top-level `asset` — handle both defensively.
+    job = (resp or {}).get("job") or {}
+    asset = job.get("asset") or (resp or {}).get("asset") or {}
     asset_id = asset.get("id")
     if not asset_id:
         raise McpError(f"upload-asset-from-url returned no asset id: {resp}")
