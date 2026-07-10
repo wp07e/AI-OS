@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAgentChatContext } from "@/lib/hooks/AgentChatContext";
+import { useGenerationBusy } from "@/lib/hooks/GenerationBusyContext";
 import type { ChatMessage, StreamingState } from "@/lib/hooks/useAgentChat";
 import type { BrandCardKey } from "@/lib/brand/cards";
 import { BRAND_CARD_EXAMPLES, brandInputPlaceholder } from "@/lib/brand/examples";
@@ -39,6 +40,7 @@ export function AgentPanel({
   aiActivated,
 }: Props) {
   const chat = useAgentChatContext();
+  const genBusy = useGenerationBusy();
   const [input, setInput] = useState("");
   const [showDebug, setShowDebug] = useState(false);
   const [showThinking, setShowThinking] = useState(false);
@@ -58,7 +60,7 @@ export function AgentPanel({
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || chat.busy || !chatActive) return;
+    if (!text || chat.busy || !chatActive || genBusy.busy) return;
     setInput("");
     await chat.send(text);
   }
@@ -73,7 +75,11 @@ export function AgentPanel({
   const examples = brandOpen && activeBrandCard
     ? BRAND_CARD_EXAMPLES[activeBrandCard]
     : workflowType ? (WORKFLOW_EXAMPLES[workflowType] ?? []) : [];
-  const placeholder = brandOpen ? brandInputPlaceholder(activeBrandCard) : "Message the agent…";
+  const placeholder = genBusy.busy
+    ? genBusy.reason ?? "Generation in progress…"
+    : brandOpen
+      ? brandInputPlaceholder(activeBrandCard)
+      : "Message the agent…";
 
   return (
     <aside className="flex min-h-0 flex-col bg-[var(--card)]/20">
@@ -182,14 +188,14 @@ export function AgentPanel({
           onChange={(e) => setInput(e.target.value)}
           placeholder={chatActive ? placeholder : "Select a workflow or library to chat…"}
           className="flex-1 rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm outline-none transition focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={chat.busy || !chatActive}
+          disabled={chat.busy || !chatActive || genBusy.busy}
         />
         <button
           type="submit"
-          disabled={chat.busy || !input.trim() || !chatActive}
+          disabled={chat.busy || !input.trim() || !chatActive || genBusy.busy}
           className="rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {chat.busy ? "…" : "↵"}
+          {chat.busy || genBusy.busy ? "…" : "↵"}
         </button>
       </form>
     </aside>

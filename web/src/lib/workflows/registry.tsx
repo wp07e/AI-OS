@@ -1,6 +1,9 @@
 import { CarouselStudio } from "@/app/app/(workflow)/carousel/CarouselStudio";
 import { useCarouselState } from "@/app/app/(workflow)/carousel/useCarouselState";
 import type { CarouselState } from "@/app/app/(workflow)/carousel/types";
+import { VideoStudio } from "@/app/app/(workflow)/video/VideoStudio";
+import { useVideoState } from "@/app/app/(workflow)/video/useVideoState";
+import type { VideoState } from "@/app/app/(workflow)/video/types";
 import type { WorkflowDefinition } from "./types";
 
 /**
@@ -38,6 +41,26 @@ export function CarouselIcon({ className }: { className?: string }) {
   );
 }
 
+export function VideoIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      className={className}
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="2" y="5" width="14" height="14" rx="2" />
+      <path d="M16 10l6-3v10l-6-3" />
+    </svg>
+  );
+}
+
 // ── Registry ───────────────────────────────────────────────────────────────
 //
 // Each entry is a WorkflowDefinition<S> with its own state generic. The map is
@@ -67,9 +90,30 @@ const carouselDefinition: WorkflowDefinition<CarouselState> = {
   ].join(" "),
 };
 
+const videoDefinition: WorkflowDefinition<VideoState> = {
+  type: "video",
+  label: "Video Studio",
+  icon: VideoIcon,
+  description: "Generate and assemble image and video clips from brand assets.",
+  folder: "videos",
+  skill: "video",
+  Canvas: VideoStudio,
+  useState: useVideoState,
+  sessionPrompt: [
+    "You are working in the Video Studio workflow.",
+    "For any generation, edit, extend, or assemble action, the SKILL.md tells you to write request.json and run a deterministic script — do NOT call image/video generation tools or ffmpeg yourself; the script owns those.",
+    "Before acting, read memory.md and state.json in the instance folder if they exist, to pick up where a previous session left off.",
+    "When you reach a meaningful milestone (starting a phase, finishing a step, hitting an error), update state.json with at least: {\"phase\": \"<current-phase>\", \"lastUpdated\": \"<ISO timestamp>\", \"errors\": [<any issues>]}.",
+    "Keep state.json enriched with the workflow fields the canvas reads: clips[] (index, prompt, sourceType, quality, continuity, settings, status, localPath, posterPath, sourceUrl, duration), images[] (id, prompt, quality, localPath, sourceUrl, status), and finalVideo {localPath, clipIndices, builtAt} once assembled.",
+    "When you pause or finish, append a short handoff note to memory.md so the next session can resume.",
+    "All paths you read or write are relative to the instance folder unless absolute.",
+  ].join(" "),
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const WORKFLOW_REGISTRY: Record<string, WorkflowDefinition<any>> = {
   carousel: carouselDefinition,
+  video: videoDefinition,
 };
 
 export type WorkflowType = keyof typeof WORKFLOW_REGISTRY;

@@ -17,4 +17,7 @@ export const WORKFLOW_EXAMPLES: Record<WorkflowType, string[]> = {
     "Create a 4-page presentation about our brand.",
     "Design an Instagram post series for our new product.",
   ],
+  video: [
+    "Assemble my clips into one final video.",
+  ],
 };

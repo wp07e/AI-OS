@@ -1,0 +1,150 @@
+import { randomUUID } from "node:crypto";
+import { NextResponse } from "next/server";
+import { currentUser } from "@/lib/auth";
+import { db } from "@/lib/db";
+import {
+  ensureWorkspaceDir,
+  getContainerForUser,
+  writeWorkspaceFileBuffer,
+} from "@/lib/docker";
+
+export const runtime = "nodejs";
+export const maxDuration = 60;
+
+/**
+ * POST /api/workspace/<instanceId>/video/upload
+ *
+ * Uploads a one-off reference image to the video instance's uploads/ folder.
+ * Unlike brand assets (global, permanent), these are per-instance and live
+ * alongside the clips. They're available as references for image/video
+ * generation without polluting the brand kit.
+ *
+ * Multipart form fields:
+ *   - file: the image binary (required; png/jpg/gif/webp)
+ *
+ * Stores at <instance_folder>/uploads/<uuid>.<ext>. Returns the relative path
+ * ("uploads/<uuid>.<ext>") which the ReferenceGrid selects and the generate
+ * route passes to the script.
+ *
+ * GET /api/workspace/<instanceId>/video/upload
+ * Lists one-off reference images in the instance's uploads/ folder.
+ */
+const MIME_BY_EXT: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
+
+export async function POST(
+  req: Request,
+  ctx: { params: Promise<{ instanceId: string }> },
+) {
+  const user = await currentUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const { instanceId } = await ctx.params;
+
+  const instance = db()
+    .prepare(
+      "SELECT id, user_id, workflow_type, folder FROM workflow_instances WHERE id = ? AND user_id = ?",
+    )
+    .get(instanceId, user.id) as
+    | { id: string; user_id: number; workflow_type: string; folder: string }
+    | undefined;
+  if (!instance) {
+    return NextResponse.json({ error: "workflow instance not found" }, { status: 404 });
+  }
+  if (instance.workflow_type !== "video") {
+    return NextResponse.json({ error: "instance is not a video workflow" }, { status: 400 });
+  }
+
+  const row = getContainerForUser(user.id);
+  if (!row || row.status !== "ready") {
+    return NextResponse.json({ error: "container not ready" }, { status: 503 });
+  }
+
+  let form: FormData;
+  try {
+    form = await req.formData();
+  } catch {
+    return NextResponse.json({ error: "expected multipart/form-data" }, { status: 400 });
+  }
+
+  const file = form.get("file");
+  if (!(file instanceof File) || file.size === 0) {
+    return NextResponse.json({ error: "missing or empty file" }, { status: 400 });
+  }
+
+  const dot = file.name.lastIndexOf(".");
+  const ext = dot >= 0 ? file.name.slice(dot + 1).toLowerCase() : "";
+  if (!ext || !(ext in MIME_BY_EXT)) {
+    return NextResponse.json(
+      { error: "unsupported file type (use png, jpg, gif, or webp)" },
+      { status: 400 },
+    );
+  }
+
+  const id = randomUUID();
+  const uploadsDir = `${instance.folder}/uploads`;
+  const filename = `${id}.${ext}`;
+  const absPath = `${uploadsDir}/${filename}`;
+  const relPath = `uploads/${filename}`;
+  const bytes = Buffer.from(await file.arrayBuffer());
+
+  await ensureWorkspaceDir(row, uploadsDir);
+  await writeWorkspaceFileBuffer(row, absPath, bytes);
+
+  return NextResponse.json({
+    path: relPath,
+    filename: file.name,
+    size: bytes.length,
+  }, { status: 201 });
+}
+
+export async function GET(
+  _req: Request,
+  ctx: { params: Promise<{ instanceId: string }> },
+) {
+  const user = await currentUser();
+  if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+
+  const { instanceId } = await ctx.params;
+
+  const instance = db()
+    .prepare(
+      "SELECT id, user_id, workflow_type, folder FROM workflow_instances WHERE id = ? AND user_id = ?",
+    )
+    .get(instanceId, user.id) as
+    | { id: string; user_id: number; workflow_type: string; folder: string }
+    | undefined;
+  if (!instance) {
+    return NextResponse.json({ error: "workflow instance not found" }, { status: 404 });
+  }
+
+  const row = getContainerForUser(user.id);
+  if (!row || row.status !== "ready") {
+    return NextResponse.json({ error: "container not ready" }, { status: 503 });
+  }
+
+  // List files in the uploads dir via execInContainer.
+  const { execInContainer } = await import("@/lib/docker");
+  const uploadsDir = `${instance.folder}/uploads`;
+  const res = await execInContainer(
+    row,
+    ["bash", "-lc", `ls -1 '${uploadsDir}' 2>/dev/null || true`],
+    { user: "appuser" },
+  );
+  const files = res.stdout
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .filter((f) => /\.(png|jpe?g|webp|gif)$/i.test(f))
+    .map((filename) => ({
+      path: `uploads/${filename}`,
+      filename,
+    }));
+
+  return NextResponse.json({ uploads: files });
+}

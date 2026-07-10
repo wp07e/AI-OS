@@ -1,0 +1,10 @@
+[project]
+name = "video-pipeline"
+version = "0.1.0"
+description = "Deterministic video/image generation pipeline for the Video Studio workflow."
+requires-python = ">=3.11"
+dependencies = [
+    "xai-sdk>=1.17.0",
+    "httpx>=0.28.1",
+    "pillow>=11.0.0",
+]

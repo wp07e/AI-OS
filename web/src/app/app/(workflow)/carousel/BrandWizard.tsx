@@ -26,7 +26,7 @@ const STEP_LABELS: Record<Step, string> = {
 };
 
 const ASSET_CATEGORIES: { key: AssetCategory; label: string; hint: string }[] = [
-  { key: "logo", label: "Logos", hint: "Brand marks placed on slides." },
+  { key: "logo", label: "Logos", hint: "Brand marks used as references." },
   { key: "photo", label: "Photos", hint: "Backgrounds & hero imagery." },
   { key: "component", label: "Components", hint: "Graphic elements." },
   { key: "icon", label: "Icons", hint: "Symbol graphics." },
@@ -34,12 +34,13 @@ const ASSET_CATEGORIES: { key: AssetCategory; label: string; hint: string }[] = 
 
 /**
  * Per-lane Brand Selection wizard. A full-screen modal overlay that walks the
- * user through choosing which Brand Kit elements apply to THIS carousel lane.
+ * user through choosing which Brand Kit elements apply to THIS lane (carousel,
+ * video, etc.). The selected assets become available as references for that
+ * lane's generation pipeline.
  *
  * Reads the global kit (GET /api/brand) + the lane's current selection
  * (GET /api/workflows/<id>/brand-selection). Saves via PUT. Once saved, the
- * carousel pipeline auto-applies the selected brand to new slides generated
- * from this lane.
+ * lane's pipeline can use the selected brand assets when generating.
  */
 export function BrandWizard({ instanceId, onClose, onSaved }: Props) {
   const [kit, setKit] = useState<BrandKit | null>(null);
@@ -116,7 +117,7 @@ export function BrandWizard({ instanceId, onClose, onSaved }: Props) {
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-white/10 px-5 py-3">
           <div className="flex items-center gap-3">
-            <h2 className="text-sm font-semibold text-[var(--foreground)]">Brand for this carousel</h2>
+            <h2 className="text-sm font-semibold text-[var(--foreground)]">Brand for this lane</h2>
             {selectionIsActive(selection) && (
               <span className="inline-flex items-center gap-1 rounded-full border border-indigo-400/30 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-medium text-indigo-200">
                 <span className="h-1.5 w-1.5 rounded-full bg-indigo-400" />
@@ -190,7 +191,7 @@ export function BrandWizard({ instanceId, onClose, onSaved }: Props) {
                 onChange={(e) => patch({ enabled: e.target.checked })}
                 className="h-3.5 w-3.5 accent-indigo-400"
               />
-              Apply brand to this carousel
+              Apply brand to this lane
             </label>
           </div>
           <div className="flex items-center gap-2">
@@ -265,7 +266,7 @@ function StepBody({
     return (
       <div className="flex flex-col gap-3">
         <div className="flex items-center justify-between">
-          <p className="text-xs text-[var(--muted)]">Which brand colors apply to this carousel?</p>
+          <p className="text-xs text-[var(--muted)]">Which brand colors apply to this lane?</p>
           <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-[var(--foreground)]/80">
             <input
               type="checkbox"
@@ -404,7 +405,7 @@ function StepBody({
   const totalAssets = Object.values(selection.assets).reduce((n, ids) => n + (ids?.length ?? 0), 0);
   return (
     <div className="flex flex-col gap-3">
-      <p className="text-xs text-[var(--muted)]">Review what will apply to slides generated from this lane:</p>
+      <p className="text-xs text-[var(--muted)]">Review what will apply to generations from this lane:</p>
       <div className="grid gap-2">
         <SummaryRow label="Brand identity" value={selection.identity ? "On" : "Off"} on={selection.identity} />
         <SummaryRow label="Colors" value={`${selectedColorCount}`} on={selectedColorCount > 0} />

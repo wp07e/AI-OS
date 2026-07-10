@@ -10,6 +10,7 @@ import { getWorkflow } from "@/lib/workflows/registry";
 import type { WorkflowState } from "@/lib/workflows/types";
 import { useAgentChat, type ChatTransport } from "@/lib/hooks/useAgentChat";
 import { AgentChatContext } from "@/lib/hooks/AgentChatContext";
+import { GenerationBusyContext, type GenerationBusyValue } from "@/lib/hooks/GenerationBusyContext";
 import type { BrandCardKey } from "@/lib/brand/cards";
 
 /**
@@ -39,6 +40,9 @@ export function AppShell() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [activeLibrary, setActiveLibrary] = useState<string | null>(null);
   const [loadingInstances, setLoadingInstances] = useState(true);
+  // Set by the active video canvas when a background generation script is
+  // running, so the AgentPanel can disable chat to prevent interference.
+  const [generationBusy, setGenerationBusy] = useState<GenerationBusyValue>({ busy: false });
 
   const refreshInstances = useCallback(async () => {
     try {
@@ -157,7 +161,8 @@ export function AppShell() {
 
   return (
     <AgentChatContext.Provider value={chat}>
-      <div className="grid flex-1 grid-cols-[240px_1fr_380px] overflow-hidden">
+      <GenerationBusyContext.Provider value={generationBusy}>
+        <div className="grid flex-1 grid-cols-[240px_1fr_380px] overflow-hidden">
         <WorkRail
           instances={instances}
           activeId={activeId}
@@ -174,7 +179,7 @@ export function AppShell() {
           {activeLibrary === "brand" ? (
             <BrandStudio onAskAI={handleAskAI} onCardChange={handleBrandCardChange} />
           ) : active ? (
-            <CanvasArea instance={active} />
+            <CanvasArea instance={active} onGenerationBusyChange={setGenerationBusy} />
           ) : (
             <EmptyCanvas />
           )}
@@ -187,19 +192,20 @@ export function AppShell() {
           activeBrandCard={activeBrandCard}
           aiActivated={aiActivated}
         />
-      </div>
+        </div>
 
-      {/* Per-lane brand wizard modal. Rendered at the shell level so it overlays
-          whatever center pane is active (lane stays visible underneath). */}
-      {brandWizardInstance && (
-        <BrandWizard
-          instanceId={brandWizardInstance.id}
-          onClose={() => setBrandWizardInstance(null)}
-          onSaved={() => {
-            refreshBrandApplied();
-          }}
-        />
-      )}
+        {/* Per-lane brand wizard modal. Rendered at the shell level so it overlays
+            whatever center pane is active (lane stays visible underneath). */}
+        {brandWizardInstance && (
+          <BrandWizard
+            instanceId={brandWizardInstance.id}
+            onClose={() => setBrandWizardInstance(null)}
+            onSaved={() => {
+              refreshBrandApplied();
+            }}
+          />
+        )}
+      </GenerationBusyContext.Provider>
     </AgentChatContext.Provider>
   );
 }
@@ -211,13 +217,43 @@ export function AppShell() {
  * Rules of Hooks unconditionally per active instance (the canvas mounts/unmounts
  * as the user switches lanes, which correctly resets polling + state).
  */
-function CanvasArea({ instance }: { instance: WorkflowInstance }) {
+function CanvasArea({
+  instance,
+  onGenerationBusyChange,
+}: {
+  instance: WorkflowInstance;
+  onGenerationBusyChange: (v: GenerationBusyValue) => void;
+}) {
   const def = getWorkflow(instance.workflow_type);
-  if (!def) {
+
+  // Hooks must run unconditionally (rules of hooks). For unknown workflow types,
+  // def is null — we pass empty values and bail to UnknownWorkflow below.
+  const result = def
+    ? def.useState(instance.id, instance.folder)
+    : { state: null, isLoading: false, error: null, refresh: () => {} };
+
+  const phase = (result?.state as WorkflowState | null)?.phase ?? "unknown";
+
+  // Signal generation-busy to the shell so the AgentPanel can disable chat
+  // during background script runs (video workflow). Only video-style phases
+  // (preparing/generating/downloading/assembling) count as "busy" — carousel
+  // phases flow through the agent chat and are already gated by chat.busy.
+  const isGenBusy =
+    phase === "preparing" ||
+    phase === "generating" ||
+    phase === "downloading" ||
+    phase === "assembling";
+  useEffect(() => {
+    onGenerationBusyChange(
+      isGenBusy
+        ? { busy: true, reason: "Generation in progress — chat paused to avoid conflicts." }
+        : { busy: false },
+    );
+  }, [isGenBusy, onGenerationBusyChange]);
+
+  if (!def || !result) {
     return <UnknownWorkflow type={instance.workflow_type} />;
   }
-
-  const result = def.useState(instance.id, instance.folder);
 
   // Loading: first poll hasn't completed yet. Show a skeleton instead of
   // passing null state to the canvas (which would render an empty-looking
@@ -234,7 +270,6 @@ function CanvasArea({ instance }: { instance: WorkflowInstance }) {
   }
 
   const Canvas = def.Canvas;
-  const phase = (result.state as WorkflowState | null)?.phase ?? "unknown";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">

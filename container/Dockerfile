@@ -52,6 +52,7 @@ RUN apt-get update \
       bash \
       socat \
       iproute2 \
+      ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 # uv — Python package runner used to launch the Grok MCP. The installer ships
@@ -90,6 +91,19 @@ COPY fixtures/      ${APP_DIR}/fixtures/
 # calling Canva generation tools itself — eliminates model-to-model variance.
 # run.py is invoked as: uv run python /app/carousel/run.py <instance_folder>
 COPY carousel/      ${APP_DIR}/carousel/
+# Deterministic video pipeline (image/video generation via the xAI SDK,
+# continuity via ffmpeg, final assembly via ffmpeg concat). The agent writes
+# request.json and invokes this script; it never calls generation tools or
+# ffmpeg itself. run.py is invoked as:
+#   uv run --project /app/video python /app/video/run.py <folder> --request request.json
+# ffmpeg is required (installed above) for last-frame extraction and assembly.
+ENV VIDEO_PIPELINE_DIR=${APP_DIR}/video
+COPY video/pyproject.toml ${VIDEO_PIPELINE_DIR}/
+COPY video/*.py           ${VIDEO_PIPELINE_DIR}/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${VIDEO_PIPELINE_DIR} \
+ && uv sync --no-dev \
+ && find ${VIDEO_PIPELINE_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # ─── Grok MCP ──────────────────────────────────────────────────────────────
 # Bundled Python MCP server (xAI Grok). Source lives in the image at

@@ -77,4 +77,8 @@ const MIME_BY_EXT: Record<string, string> = {
   md: "text/markdown; charset=utf-8",
   txt: "text/plain; charset=utf-8",
   csv: "text/csv; charset=utf-8",
+  // Video — needed so <video src> streams with the correct content-type.
+  mp4: "video/mp4",
+  webm: "video/webm",
+  mov: "video/quicktime",
 };

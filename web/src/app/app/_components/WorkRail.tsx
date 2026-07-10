@@ -253,7 +253,7 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
                                     e.stopPropagation();
                                     onOpenBrandWizard(inst);
                                   }}
-                                  title="Brand for this carousel"
+                                  title="Brand for this lane"
                                   aria-label={`Brand settings for ${inst.title}`}
                                   className={
                                     "absolute right-8 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded transition " +
