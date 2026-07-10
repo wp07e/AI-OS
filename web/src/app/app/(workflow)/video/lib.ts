@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { BrandKit } from "@/lib/brand/types";
+import type { BrandAsset, BrandKit } from "@/lib/brand/types";
 import type { Quality, VideoSettings } from "./types";
 
 /**
@@ -65,6 +65,47 @@ export function useBrandKit() {
   }, []);
 
   return { kit, loading };
+}
+
+/**
+ * Load the per-lane brand selection (which assets the user picked via the Brand
+ * wizard for this specific lane). Returns the set of selected asset IDs — only
+ * these assets should appear in the ReferenceGrid, not the entire brand kit.
+ */
+export function useLaneBrandAssets(instanceId: string, kit: BrandKit | null) {
+  const [selectedAssetIds, setSelectedAssetIds] = useState<Set<string>>(new Set());
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/workflows/${instanceId}/brand-selection`, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.selection) return;
+        const sel = data.selection;
+        // Flatten the per-category asset ID lists into one set.
+        const ids = new Set<string>();
+        if (sel.assets) {
+          for (const catIds of Object.values(sel.assets)) {
+            if (Array.isArray(catIds)) {
+              for (const id of catIds) ids.add(id);
+            }
+          }
+        }
+        setSelectedAssetIds(ids);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [instanceId]);
+
+  // Filter the kit to only selected assets.
+  const assets: BrandAsset[] = kit?.assets.filter((a) => selectedAssetIds.has(a.id)) ?? [];
+  return { assets, loading, selectedAssetIds };
 }
 
 export interface UploadedRef {

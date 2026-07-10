@@ -3,7 +3,7 @@
 import { useMemo, useState } from "react";
 import type { CanvasProps } from "@/lib/workflows/types";
 import { useAgentChatContext } from "@/lib/hooks/AgentChatContext";
-import { postGenerate, useBrandKit, useUploads } from "./lib";
+import { postGenerate, useBrandKit, useLaneBrandAssets, useUploads } from "./lib";
 import { ClipFilmstrip } from "./ClipFilmstrip";
 import { ClipPlayer } from "./ClipPlayer";
 import { FinalVideoCard } from "./FinalVideoCard";
@@ -25,6 +25,11 @@ import type { VideoClip, VideoState } from "./types";
 export function VideoStudio({ instanceId, state }: CanvasProps<VideoState>) {
   const chat = useAgentChatContext();
   const { kit } = useBrandKit();
+  const { assets: laneAssets } = useLaneBrandAssets(instanceId, kit);
+  // Construct a kit with only the assets selected for this lane (via the Brand
+  // wizard). The ReferenceGrid reads kit.assets — so passing a filtered set
+  // ensures only wizard-selected assets appear, not the entire brand kit.
+  const laneKit = kit ? { ...kit, assets: laneAssets } : null;
   const { uploads, refresh: refreshUploads } = useUploads(instanceId);
   const [selected, setSelected] = useState<number | null>(null);
   const [dismissedErrors, setDismissedErrors] = useState<string[]>([]);
@@ -205,7 +210,7 @@ export function VideoStudio({ instanceId, state }: CanvasProps<VideoState>) {
         </div>
         <GeneratePanel
           instanceId={instanceId}
-          kit={kit}
+          kit={laneKit}
           version={version}
           clips={clips}
           images={images}
