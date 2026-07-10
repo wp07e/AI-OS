@@ -19,6 +19,8 @@ interface Props {
   onSelectLibrary: (key: string | null) => void;
   /** Opens the per-lane brand wizard for an instance. */
   onOpenBrandWizard: (inst: WorkflowInstance) => void;
+  /** Opens the per-lane automation wizard for an instance (video lanes only). */
+  onOpenAutomationWizard: (inst: WorkflowInstance) => void;
   onRefresh: () => void;
 }
 
@@ -33,7 +35,7 @@ interface Props {
  * their create + open buttons are disabled and an inline note points at the
  * "Connect Canva" affordance in the header (see CanvaStatusProvider).
  */
-export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loading, onSelect, onSelectLibrary, onOpenBrandWizard, onRefresh }: Props) {
+export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loading, onSelect, onSelectLibrary, onOpenBrandWizard, onOpenAutomationWizard, onRefresh }: Props) {
   const { connected, loading: canvaLoading } = useCanvaStatus();
   // Block only on a confirmed disconnect; while the probe is in flight the
   // buttons stay enabled so connected users never see a gate flicker.
@@ -248,6 +250,19 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
                             </button>
                             {!blocked && (
                               <>
+                                {inst.workflow_type === "video" && (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      onOpenAutomationWizard(inst);
+                                    }}
+                                    title="Automate this lane"
+                                    aria-label={`Automate ${inst.title}`}
+                                    className="absolute right-14 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-100 transition hover:bg-indigo-500/15 hover:text-indigo-300"
+                                  >
+                                    <SparkleIcon />
+                                  </button>
+                                )}
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
@@ -423,6 +438,15 @@ function BrandSwatchIcon({ active }: { active: boolean }) {
       <circle cx="7.5" cy="11.5" r="1" fill="currentColor" stroke="none" />
       <circle cx="12" cy="7.5" r="1" fill="currentColor" stroke="none" />
       <circle cx="16.5" cy="11.5" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+/** Sparkle icon for the per-lane automation button (video lanes only). */
+function SparkleIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z" />
     </svg>
   );
 }

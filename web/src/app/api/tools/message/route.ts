@@ -19,6 +19,7 @@ import { getWorkflow } from "@/lib/workflows/registry";
 import { brandSessionPrime } from "@/lib/brand/prime";
 import { brandCardPreamble } from "@/lib/brand/preamble";
 import { isBrandCardKey } from "@/lib/brand/cards";
+import { buildAutomationPrefill } from "@/lib/video/automation-prefill";
 
 export const runtime = "nodejs";
 export const maxDuration = 600;
@@ -124,9 +125,15 @@ export async function POST(req: Request) {
     // the agent reasons WITH the brand when writing the brief + slide copy.
     // Empty when no selection is applied → no noise. Hidden from the chat
     // bubbles (the route filters user-message echoes from the event stream).
+    //
+    // Automation prefill: if the lane has an automation_request.json (written
+    // by the automate route), prepend an automation-mode context block so the
+    // agent knows to analyze assets + write a storyboard + run the script.
     const { buildLaneBrandPrefill } = await import("@/lib/brand/lane-prefill");
     const brandPrefill = await buildLaneBrandPrefill(row, instance.folder);
-    if (brandPrefill) deliveredMessage = `${brandPrefill}\n\n${message}`;
+    const automationPrefill = await buildAutomationPrefill(row, instance.folder);
+    const prefills = [automationPrefill, brandPrefill].filter(Boolean).join("\n\n");
+    if (prefills) deliveredMessage = `${prefills}\n\n${message}`;
 
     // Build the one-time session prime. Sent ONLY when a new session is created
     // (inside getOrCreateSession); no-op on a cache hit.
