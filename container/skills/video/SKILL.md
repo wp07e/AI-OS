@@ -149,3 +149,76 @@ Omit `clipIndices` to assemble all included clips in order.
 Before acting, read `memory.md` and `state.json` in the instance folder to pick up where a previous session left off. When you pause or finish, append a short handoff note to `memory.md`.
 
 All paths are relative to the instance folder unless absolute.
+
+---
+
+## Automation Mode
+
+When the user triggers an automation (via the ✨ AI icon on the video lane), you receive a chat message with automation context prepended. The message tells you to run a video automation.
+
+### What you do:
+
+1. Read `automation_request.json` from the instance folder — it contains the full configuration (clip count, duration, resolution, quality, per-clip assets, base story).
+2. Read `brand_selection.json` to see which brand assets are available for this lane.
+3. For each asset the user assigned to clips (brand assets or uploads), call `grok.chat_with_vision` to understand what the asset is (logo, photo, character, scene, etc.). Pass the asset path from `/workspace/brand/assets/<id>.<ext>` or the instance's `uploads/` folder.
+4. Write `storyboard.json` to the instance folder with per-clip prompts based on:
+   - The base story line (if provided)
+   - Your understanding of the analyzed assets
+   - Per-clip hint prompts (if the user provided them)
+   - Continuity settings (none / last_frame)
+5. Post a progress message to chat: "Analyzed N assets, wrote storyboard for N clips. Starting generation..."
+6. Run the script:
+   ```bash
+   uv run --project /app/video python /app/video/run.py '<instance_folder>' --request automation_request.json
+   ```
+   Use the fire-and-forget form (nohup ... &) since generation takes a long time.
+
+### What you do NOT do:
+
+- You do NOT call generation tools (`grok.generate_video`, `grok.generate_image`, `grok.extend_video`)
+- You do NOT call ffmpeg
+- You do NOT write `state.json` (the script owns that)
+- The ONLY new tool you use is `grok.chat_with_vision` for asset analysis
+
+### storyboard.json format
+
+```json
+{
+  "clips": [
+    {
+      "index": 0,
+      "prompt": "Detailed shot description based on the story and analyzed assets...",
+      "quality": "low",
+      "settings": { "duration": 6, "aspect_ratio": "16:9", "resolution": "720p" },
+      "continuity": "none",
+      "references": ["<brand-asset-id>", "..."],
+      "startImageExport": "<brand-asset-id or null>",
+      "seedPrompt": null
+    },
+    {
+      "index": 1,
+      "prompt": "Next shot description...",
+      "quality": "low",
+      "settings": { "duration": 6, "aspect_ratio": "16:9", "resolution": "720p" },
+      "continuity": "last_frame",
+      "sourceClipIndex": 0,
+      "references": [],
+      "seedPrompt": null
+    }
+  ],
+  "storySummary": "One-sentence summary of the overall story",
+  "analyzedAssets": {
+    "<brand-asset-id>": "Description of what the asset depicts"
+  }
+}
+```
+
+Each clip's fields map directly to the `request.json` shape the script's `generate_video` op understands. The `references` field takes brand asset ids; the script resolves them to file paths. Use `startImageExport` when a specific asset should be the starting frame (image-to-video).
+
+### Story writing guidelines
+
+- If the user provided a base story, build per-clip prompts that advance that narrative across the clips.
+- If no base story was provided, create your own narrative based on the analyzed assets.
+- For clips with `assetMode: "ai"`, don't assign brand assets — let the script generate seed frames from your prompt.
+- For clips with `continuity: "last_frame"`, set `sourceClipIndex` to the previous clip's index.
+- Make each clip's prompt detailed and visual — describe the scene, action, lighting, and mood.

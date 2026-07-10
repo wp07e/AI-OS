@@ -248,13 +248,14 @@ function CanvasArea({
 
   // Signal generation-busy to the shell so the AgentPanel can disable chat
   // during background script runs (video workflow). Only video-style phases
-  // (preparing/generating/downloading/assembling) count as "busy" — carousel
-  // phases flow through the agent chat and are already gated by chat.busy.
+  // (preparing/generating/downloading/assembling/automating) count as "busy" —
+  // carousel phases flow through the agent chat and are already gated by chat.busy.
   const isGenBusy =
     phase === "preparing" ||
     phase === "generating" ||
     phase === "downloading" ||
-    phase === "assembling";
+    phase === "assembling" ||
+    phase === "automating";
   useEffect(() => {
     onGenerationBusyChange(
       isGenBusy

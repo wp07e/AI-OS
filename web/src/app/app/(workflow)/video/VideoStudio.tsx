@@ -9,7 +9,7 @@ import { ClipPlayer } from "./ClipPlayer";
 import { FinalVideoCard } from "./FinalVideoCard";
 import { GeneratePanel } from "./GeneratePanel";
 import { VideoToolbar } from "./VideoToolbar";
-import type { VideoClip, VideoState } from "./types";
+import type { AutomationProgress, VideoClip, VideoState } from "./types";
 
 /**
  * The Video Studio canvas — a storyboard of independent video clips that can be
@@ -161,6 +161,10 @@ export function VideoStudio({ instanceId, state }: CanvasProps<VideoState>) {
         );
       })()}
 
+      {state?.automation && state.automation.phase !== "complete" && (
+        <AutomationProgressBar automation={state.automation} />
+      )}
+
       <FinalVideoCard
         assembling={assembling}
         onAssemble={handleAssemble}
@@ -249,6 +253,45 @@ function isGenerating(phase: string): boolean {
     !phase.startsWith("error")
   );
 }
+// Note: "automating" phase also returns true here, which is correct —
+// the automation run should disable the generate panel just like manual generation.
 
 // Re-export the clip type for convenience (used by sub-components importing from here).
 export type { VideoClip };
+
+/** Progress bar shown during automation runs (op: "automate"). Driven by the
+ *  `automation` field in state.json, polled every 2.5s. Shows phase, clip
+ *  progress, and failed clip count. */
+function AutomationProgressBar({ automation }: { automation: AutomationProgress }) {
+  const { totalClips, completedClips, failedClips, currentClip, phase } = automation;
+  const progress = totalClips > 0 ? ((completedClips + failedClips) / totalClips) * 100 : 0;
+
+  const phaseLabel = phase === "preparing"
+    ? "Preparing…"
+    : phase === "generating"
+      ? `Generating clip ${currentClip + 1}/${totalClips}`
+      : phase === "assembling"
+        ? "Assembling final video…"
+        : "Complete";
+
+  return (
+    <div className="shrink-0 border-b border-indigo-400/20 bg-indigo-500/[0.04] px-4 py-2.5">
+      <div className="mb-1.5 flex items-center gap-2">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse text-indigo-300" aria-hidden>
+          <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z" />
+        </svg>
+        <span className="text-xs font-semibold text-indigo-200">Automation</span>
+        <span className="text-[11px] text-[var(--muted)]">{phaseLabel}</span>
+        {failedClips > 0 && (
+          <span className="text-[10px] text-amber-300">{failedClips} skipped</span>
+        )}
+      </div>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/10">
+        <div
+          className="h-full rounded-full bg-indigo-400 transition-all duration-500"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+    </div>
+  );
+}
