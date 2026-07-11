@@ -215,10 +215,53 @@ When the user triggers an automation (via the ✨ AI icon on the video lane), yo
 
 Each clip's fields map directly to the `request.json` shape the script's `generate_video` op understands. The `references` field takes brand asset ids; the script resolves them to file paths. Use `startImageExport` when a specific asset should be the starting frame (image-to-video).
 
-### Story writing guidelines
+### Story writing guidelines — READ CAREFULLY
 
-- If the user provided a base story, build per-clip prompts that advance that narrative across the clips.
-- If no base story was provided, create your own narrative based on the analyzed assets.
-- For clips with `assetMode: "ai"`, don't assign brand assets — let the script generate seed frames from your prompt.
-- For clips with `continuity: "last_frame"`, set `sourceClipIndex` to the previous clip's index.
-- Make each clip's prompt detailed and visual — describe the scene, action, lighting, and mood.
+**CRITICAL: The clips must form ONE connected story, not independent scenes.**
+
+Follow this process:
+
+1. **Write the full story arc FIRST.** Before writing any individual clip prompts, decide the complete narrative from beginning to end. What happens in clip 1 flows into clip 2, which flows into clip 3, etc. Think of it as a single short film broken into shots — not a collection of unrelated videos.
+
+2. **Then break the story into per-clip prompts.** Each clip's prompt describes one shot/segment of that continuous story. A viewer watching the clips back-to-back should see a coherent narrative unfold.
+
+3. **For clips with `continuity: "last_frame"`:** The prompt MUST describe what happens NEXT — continuing directly from where the prior clip ended. The prior clip's last frame becomes the visual starting point (the script handles this automatically), so your prompt should describe the NEXT action, not restart the scene. You MUST also set `sourceClipIndex` to the prior clip's index.
+
+4. **For clips with `continuity: "none"`:** The prompt starts a fresh scene. This is a hard cut — the visual and narrative can shift entirely.
+
+5. **Be creative.** If the base story is "funny," write prompts that are actually funny — comedic timing, visual gags, character reactions. The AI generates what you describe, so make it vivid and entertaining.
+
+**Example — 3-clip connected story (base story: "funny dog at a coffee shop"):**
+
+```json
+{
+  "storySummary": "A dog enthusiastically orders a coffee, gets confused by the menu, and dramatically enjoys its first sip.",
+  "clips": [
+    {
+      "index": 0,
+      "prompt": "A golden retriever wearing a tiny scarf pushes open the door of a cozy coffee shop with its paw, bell jingling. The dog trots eagerly toward the counter, tail wagging. Warm morning light streams through the windows. The coffee shop logo is visible on the window.",
+      "continuity": "none",
+      "references": ["<logo-asset-id>"],
+      "startImageExport": "<logo-asset-id>"
+    },
+    {
+      "index": 1,
+      "prompt": "The golden retriever stands on its hind legs at the counter, tilting its head in confusion at the chalkboard menu above. A barista cat in an apron watches with raised eyebrows. The dog's eyes dart back and forth between options, clearly overwhelmed. Comedic head-tilt energy.",
+      "continuity": "last_frame",
+      "sourceClipIndex": 0
+    },
+    {
+      "index": 2,
+      "prompt": "The golden retriever is now sitting at a small table, holding a steaming coffee cup between its paws. It takes a careful sip, eyes go wide with delight, ears perk up, and the tail starts wagging furiously. The dog looks around as if discovering the meaning of life. Heartwarming and funny.",
+      "continuity": "last_frame",
+      "sourceClipIndex": 1
+    }
+  ]
+}
+```
+
+Notice how each clip's prompt describes the NEXT thing that happens — the story flows continuously. Clip 2 picks up where clip 1 left off (dog at the counter, having just entered), and clip 3 picks up from clip 2 (dog now sitting with coffee, having been at the counter).
+
+**For clips with `assetMode: "ai"`**, don't assign brand assets — let the script generate seed frames from your prompt.
+
+**`sourceClipIndex` is REQUIRED for every `last_frame` clip.** Set it to the index of the prior clip (e.g., clip 1's sourceClipIndex is 0, clip 2's is 1, etc.).

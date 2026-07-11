@@ -306,6 +306,13 @@ def _generate_single_clip(
     new_index = S.next_clip_index(clips)
     num = S.clip_num(new_index)
 
+    # Merge existing_clips into state so _resolve_starting_frame can find the
+    # prior clip's localPath for last_frame continuity resolution. During the
+    # automation loop, the in-memory generated_clips list is the source of truth
+    # (state.json on disk may be stale or not yet written for the latest clip).
+    if existing_clips is not None:
+        state["clips"] = existing_clips
+
     frame_path, extras = _resolve_starting_frame(folder, clip_spec, state, client, quality)
 
     # The xAI API does NOT allow both `image` (starting frame) and
@@ -619,6 +626,14 @@ def _do_automate(folder: str, req: dict, client: GrokClient) -> None:
             "phase": "generating",
             "startedAt": S._now_iso(),
         }})
+
+        # Safety net: ensure last_frame clips have sourceClipIndex pointing to the
+        # previous clip. The agent should set this, but if it doesn't, we default
+        # to the immediately preceding clip index so visual continuity is preserved.
+        if clip_spec.get("continuity") == "last_frame" and clip_spec.get("sourceClipIndex") is None:
+            if i > 0:
+                clip_spec["sourceClipIndex"] = i - 1
+                S.append_memory(folder, f"ℹ️ Clip {i+1}: auto-set sourceClipIndex={i-1} for last_frame continuity")
 
         # Generate with retry. Pass existing clips so last_frame continuity
         # can resolve the previous clip's path.

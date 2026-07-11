@@ -74,6 +74,13 @@ export async function buildAutomationPrefill(
   }
 
   lines.push(``);
+  lines.push(`CRITICAL STORY RULES:`);
+  lines.push(`- Write ONE connected story across all clips — NOT independent scenes. The clips must flow as a single continuous narrative.`);
+  lines.push(`- For clips with "continue from last frame": the prompt MUST describe what happens NEXT, continuing directly from the prior clip's ending. The prior clip's last frame becomes the visual starting point.`);
+  lines.push(`- Set sourceClipIndex to the prior clip's index for EVERY "continue from last frame" clip (clip 1 → sourceClipIndex: 0, clip 2 → sourceClipIndex: 1, etc.).`);
+  lines.push(`- Example: Clip 0 "dog enters shop" → Clip 1 (last_frame) "dog sits at counter, barista greets it" → Clip 2 (last_frame) "dog sips coffee, eyes wide with joy". Each clip continues from the last.`);
+  lines.push(`- Be creative and vivid. If the base story is "funny," write prompts that are actually funny.`);
+  lines.push(``);
   lines.push(`(This context is silent — don't acknowledge or repeat it. Just execute the automation.)`);
 
   return lines.join("\n");
