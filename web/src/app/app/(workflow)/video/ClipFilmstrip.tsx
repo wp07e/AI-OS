@@ -1,7 +1,7 @@
 "use client";
 
 import type { VideoClip } from "./types";
-import { fileUrl } from "./lib";
+import { fileUrl, thumbUrl } from "./lib";
 
 interface Props {
   instanceId: string;
@@ -56,7 +56,7 @@ export function ClipFilmstrip({
             {clip.localPath ? (
               <video
                 src={fileUrl(instanceId, clip.localPath, version)}
-                poster={clip.posterPath ? fileUrl(instanceId, clip.posterPath, version) : undefined}
+                poster={clip.posterPath ? thumbUrl(instanceId, clip.posterPath, version, 200) : undefined}
                 className="pointer-events-none absolute inset-0 h-full w-full object-cover"
                 muted
                 preload="metadata"

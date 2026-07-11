@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BrandAsset } from "@/lib/brand/types";
 import type { Quality, Continuity } from "./types";
-import { useBrandKit, useLaneBrandAssets, useUploads, uploadReference, fileUrl, estimateVideoCost } from "./lib";
+import { useBrandKit, useLaneBrandAssets, useUploads, uploadReference, fileUrl, thumbUrl, estimateVideoCost } from "./lib";
 
 interface Props {
   instanceId: string;
@@ -497,7 +497,7 @@ function ClipCard(props: {
                       (checked ? "border-indigo-400 ring-1 ring-indigo-400/40" : "border-white/10 hover:border-white/30")
                     }>
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={`/api/brand/assets/${encodeURIComponent(a.id)}`} alt={a.label}
+                    <img src={`/api/brand/assets/${encodeURIComponent(a.id)}?w=200`} alt={a.label}
                       className="h-full w-full object-contain" loading="lazy" />
                     {checked && (
                       <span className="absolute right-0.5 top-0.5 grid h-3 w-3 place-items-center rounded-full bg-indigo-500 text-[7px] text-white">✓</span>
@@ -524,7 +524,7 @@ function ClipCard(props: {
                           (checked ? "border-indigo-400 ring-1 ring-indigo-400/40" : "border-white/10 hover:border-white/30")
                         }>
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={fileUrl(instanceId, u.path)} alt={u.filename}
+                        <img src={thumbUrl(instanceId, u.path, undefined, 200)} alt={u.filename}
                           className="h-full w-full object-contain" loading="lazy" />
                         {checked && (
                           <span className="absolute right-0.5 top-0.5 grid h-3 w-3 place-items-center rounded-full bg-indigo-500 text-[7px] text-white">✓</span>

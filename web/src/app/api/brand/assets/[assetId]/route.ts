@@ -5,6 +5,7 @@ import {
   removeWorkspaceFile,
 } from "@/lib/docker";
 import { loadBrandKit, saveBrandKit } from "@/lib/brand/store";
+import { isResizable, parseWidthParam, resizeImage } from "@/lib/image-thumbnail";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,7 +18,7 @@ export const dynamic = "force-dynamic";
  * Auth: user must own the kit; container must be ready.
  */
 export async function GET(
-  _req: Request,
+  req: Request,
   ctx: { params: Promise<{ assetId: string }> },
 ) {
   const user = await currentUser();
@@ -35,6 +36,25 @@ export async function GET(
 
   const buf = await readWorkspaceFileBuffer(row, asset.path);
   if (!buf) return new Response("not found", { status: 404 });
+
+  // Thumbnail support: if ?w= is present and the file is an image, resize
+  // on-the-fly. Brand assets are often displayed at 50-80px tiles but served
+  // at full upload resolution.
+  const ext = asset.path.split(".").pop()?.toLowerCase() ?? "";
+  const width = parseWidthParam(new URL(req.url));
+  if (width && isResizable(ext)) {
+    const thumb = await resizeImage(buf, width);
+    if (thumb) {
+      return new Response(new Uint8Array(thumb), {
+        status: 200,
+        headers: {
+          "Content-Type": "image/jpeg",
+          "Content-Length": String(thumb.length),
+          "Cache-Control": "public, max-age=300",
+        },
+      });
+    }
+  }
 
   return new Response(new Uint8Array(buf), {
     status: 200,

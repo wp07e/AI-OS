@@ -181,7 +181,7 @@ function AssetThumb({ asset, onDelete }: { asset: BrandAsset; onDelete: () => Pr
     <div className="group relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-black/30">
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
-        src={`/api/brand/assets/${encodeURIComponent(asset.id)}`}
+        src={`/api/brand/assets/${encodeURIComponent(asset.id)}?w=200`}
         alt={asset.label}
         className="h-full w-full object-contain"
         loading="lazy"

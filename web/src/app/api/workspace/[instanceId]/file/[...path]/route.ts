@@ -1,6 +1,7 @@
 import { currentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { getContainerForUser, readWorkspaceFileBuffer } from "@/lib/docker";
+import { isResizable, parseWidthParam, resizeImage } from "@/lib/image-thumbnail";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,7 +17,7 @@ export const dynamic = "force-dynamic";
  * Auth: instance must belong to the current user. Container must be ready.
  */
 export async function GET(
-  _req: Request,
+  req: Request,
   ctx: { params: Promise<{ instanceId: string; path: string[] }> },
 ) {
   const user = await currentUser();
@@ -48,6 +49,26 @@ export async function GET(
   // Infer content type from extension so <img src=...> and iframe embeds work.
   const ext = abs.split(".").pop()?.toLowerCase() ?? "";
   const contentType = MIME_BY_EXT[ext] ?? "application/octet-stream";
+
+  // Thumbnail support: if ?w= is present and the file is an image, resize
+  // on-the-fly via sharp. This avoids sending a 1080×1350px PNG to a 64px tile.
+  // The ?v= cache-buster still works for invalidation.
+  const width = parseWidthParam(new URL(req.url));
+  if (width && isResizable(ext)) {
+    const thumb = await resizeImage(buf, width);
+    if (thumb) {
+      return new Response(new Uint8Array(thumb), {
+        status: 200,
+        headers: {
+          "Content-Type": "image/jpeg",
+          "Content-Length": String(thumb.length),
+          // Thumbnails are stable for a given ?v= value — cache aggressively.
+          "Cache-Control": "public, max-age=300",
+        },
+      });
+    }
+    // If resize failed (corrupt image), fall through to serve raw bytes.
+  }
 
   return new Response(new Uint8Array(buf), {
     status: 200,

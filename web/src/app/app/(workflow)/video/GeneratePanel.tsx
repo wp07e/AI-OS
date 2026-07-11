@@ -10,6 +10,7 @@ import {
   estimateImageCost,
   estimateVideoCost,
   fileUrl,
+  thumbUrl,
   imageResolutionOptions,
   useGenerateSubmit,
   videoResolutionOptions,
@@ -402,7 +403,7 @@ function VideoForm({
                   {g.localPath ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={fileUrl(instanceId, g.localPath, version)}
+                      src={thumbUrl(instanceId, g.localPath, version, 300)}
                       alt={g.prompt}
                       className="h-full w-full object-contain"
                       loading="lazy"
@@ -691,7 +692,7 @@ function ImageGallery({
             {g.localPath ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={fileUrl(instanceId, g.localPath, version)}
+                src={thumbUrl(instanceId, g.localPath, version, 300)}
                 alt={g.prompt}
                 className="h-full w-full object-contain"
                 loading="lazy"

@@ -52,7 +52,7 @@ export function Filmstrip({ instanceId, slides, selectedIndex, phase, onSelect, 
             {slide.renderPath ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={`/api/workspace/${instanceId}/file/${slide.renderPath}${version ? `?v=${version}` : ""}`}
+                src={`/api/workspace/${instanceId}/file/${slide.renderPath}?w=200${version ? `&v=${version}` : ""}`}
                 alt={`Slide ${slide.index + 1}`}
                 className="absolute inset-0 h-full w-full object-cover"
               />

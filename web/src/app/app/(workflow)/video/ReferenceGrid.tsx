@@ -3,7 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import type { BrandKit } from "@/lib/brand/types";
 import type { UploadedRef } from "./lib";
-import { uploadReference, fileUrl } from "./lib";
+import { uploadReference, fileUrl, thumbUrl } from "./lib";
 
 /**
  * Multi-select grid of reference images from two sources:
@@ -70,7 +70,7 @@ export function ReferenceGrid({ instanceId, kit, uploads, selected, onToggle, on
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        src={`/api/brand/assets/${encodeURIComponent(a.id)}`}
+                        src={`/api/brand/assets/${encodeURIComponent(a.id)}?w=200`}
                         alt={a.label}
                         className="h-full w-full object-contain"
                         loading="lazy"
@@ -110,7 +110,7 @@ export function ReferenceGrid({ instanceId, kit, uploads, selected, onToggle, on
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        src={fileUrl(instanceId, u.path)}
+                        src={thumbUrl(instanceId, u.path, undefined, 200)}
                         alt={u.filename}
                         className="h-full w-full object-contain"
                         loading="lazy"

@@ -242,6 +242,18 @@ export function fileUrl(instanceId: string, path: string, version?: string): str
   return version ? `${base}?v=${version}` : base;
 }
 
+/** Build a thumbnail URL with ?w=<width> for small-tile displays.
+ *  Appends to the fileUrl, preserving the ?v= cache-buster if present. */
+export function thumbUrl(
+  instanceId: string,
+  path: string,
+  version?: string,
+  width = 200,
+): string {
+  const base = fileUrl(instanceId, path, version);
+  return `${base}${base.includes("?") ? "&" : "?"}w=${width}`;
+}
+
 /** Re-usable submit hook: tracks "submitting" state + error. */
 export function useGenerateSubmit(instanceId: string) {
   const [submitting, setSubmitting] = useState(false);

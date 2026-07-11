@@ -378,7 +378,7 @@ function StepBody({
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={`/api/brand/assets/${encodeURIComponent(a.id)}`}
+                          src={`/api/brand/assets/${encodeURIComponent(a.id)}?w=200`}
                           alt={a.label}
                           className="h-full w-full object-contain"
                           loading="lazy"
