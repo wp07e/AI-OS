@@ -111,6 +111,30 @@ export async function POST(
     );
   }
 
+  // ── Write "starting" state immediately ──────────────────────────────────
+  // The automation has a long startup gap: the agent must analyze assets with
+  // vision, write storyboard.json, and launch the script before any state
+  // changes. We write "starting" here so the canvas disables chat + form
+  // within the next 2.5s poll. The script will overwrite this with "automating"
+  // when _do_automate begins.
+  const startingState = JSON.stringify({
+    phase: "starting",
+    lastUpdated: new Date().toISOString(),
+    errors: [],
+    active: { op: "automate", label: "Analyzing assets…" },
+  });
+  const stateWriteCmd = `python3 -c "
+import json, os
+path = '${instance.folder}/state.json'
+state = {}
+try:
+    with open(path) as f: state = json.load(f)
+except: pass
+state.update(json.loads('''${startingState.replace(/'/g, "\\'")}'''))
+with open(path, 'w') as f: json.dump(state, f, indent=2)
+"`;
+  await execInContainer(row, ["bash", "-lc", stateWriteCmd], { user: "appuser" }).catch(() => {});
+
   // ── Send the chat message to trigger the agent ──────────────────────────
   // The message route will prepend buildAutomationPrefill() when it detects
   // automation_request.json in the folder. We fire prompt_async directly

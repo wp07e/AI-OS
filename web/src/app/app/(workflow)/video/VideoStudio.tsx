@@ -161,6 +161,19 @@ export function VideoStudio({ instanceId, state }: CanvasProps<VideoState>) {
         );
       })()}
 
+      {phase === "starting" && (
+        <div className="shrink-0 border-b border-indigo-400/20 bg-indigo-500/[0.04] px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="animate-pulse text-indigo-300" aria-hidden>
+              <path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z" />
+            </svg>
+            <span className="text-xs font-semibold text-indigo-200">
+              {active?.label || "Starting…"}
+            </span>
+          </div>
+        </div>
+      )}
+
       {state?.automation && state.automation.phase !== "complete" && (
         <AutomationProgressBar automation={state.automation} />
       )}
