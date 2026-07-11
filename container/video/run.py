@@ -593,6 +593,38 @@ def _do_automate(folder: str, req: dict, client: GrokClient) -> None:
     clips_spec = storyboard.get("clips", [])
     total = len(clips_spec)
 
+    # Safety net: merge per-clip brand/uploaded assets from automation_request.json
+    # into the storyboard clips if the agent omitted them. The agent SHOULD carry
+    # the user's selected assets into the storyboard's "references" field, but if
+    # it doesn't, we inject them here so the user's explicit asset selections are
+    # never silently dropped. This mirrors the sourceClipIndex safety net.
+    try:
+        auto_req = _read_request(folder, "automation_request.json")
+        req_clips = auto_req.get("clips", [])
+        for i, clip_spec in enumerate(clips_spec):
+            if i >= len(req_clips):
+                break
+            rc = req_clips[i]
+            # Only inject if the clip has a non-"ai" asset mode and the storyboard
+            # is missing references (agent forgot to carry them forward).
+            if rc.get("assetMode") == "ai":
+                continue
+            existing_refs = set(clip_spec.get("references", []))
+            added = []
+            for aid in (rc.get("brandAssets") or []):
+                if aid not in existing_refs:
+                    added.append(aid)
+                    existing_refs.add(aid)
+            for upath in (rc.get("uploadedAssets") or []):
+                if upath not in existing_refs:
+                    added.append(upath)
+                    existing_refs.add(upath)
+            if added:
+                clip_spec["references"] = clip_spec.get("references", []) + added
+                S.append_memory(folder, f"ℹ️ Clip {i+1}: injected {len(added)} missing asset(s) from automation_request")
+    except Exception:
+        pass  # Non-fatal — proceed with storyboard as-is
+
     if total == 0:
         S.write_state(folder, "complete", active=None, extra={"automation": {
             "totalClips": 0, "completedClips": 0, "failedClips": 0,

@@ -215,6 +215,32 @@ When the user triggers an automation (via the ✨ AI icon on the video lane), yo
 
 Each clip's fields map directly to the `request.json` shape the script's `generate_video` op understands. The `references` field takes brand asset ids; the script resolves them to file paths. Use `startImageExport` when a specific asset should be the starting frame (image-to-video).
 
+**CRITICAL — You MUST carry the user's selected assets into the storyboard.** For each clip, look at the corresponding clip in `automation_request.json` — if the user selected brand assets (`brandAssets`) or uploads (`uploadedAssets`), you MUST include those asset ids in the storyboard clip's `references` field. If you omit them, the user's explicit asset selections will not appear in the video.
+
+### Reference images and the @imageN convention
+
+When a clip has reference images (either user-selected assets or a last-frame starting image), the script passes them to the video model. The model sees them in selection order as `@image1`, `@image2`, `@image3`, etc. You should reference them explicitly in the prompt so the model knows which image to use where.
+
+**For `last_frame` clips:** The prior clip's last frame is automatically added as the FIRST reference. So:
+- `@image1` = the last frame of the prior clip (the visual starting point)
+- `@image2` = the first user-selected asset for this clip
+- `@image3` = the second user-selected asset for this clip
+- etc.
+
+**For `none` clips (new scene):** No auto-added last frame, so:
+- `@image1` = the first user-selected asset for this clip
+- `@image2` = the second user-selected asset for this clip
+- etc.
+
+**Example prompt using references:**
+```
+"@image1 (the golden retriever from the last shot) sits at the counter.
+The barista cat in @image2 greets the dog warmly. The coffee shop logo
+from @image3 is visible on the chalkboard menu behind them."
+```
+
+Without these explicit `@imageN` references, the model may not know which image to focus on or where to place them.
+
 ### Story writing guidelines — READ CAREFULLY
 
 **CRITICAL: The clips must form ONE connected story, not independent scenes.**
@@ -233,35 +259,45 @@ Follow this process:
 
 **Example — 3-clip connected story (base story: "funny dog at a coffee shop"):**
 
+User selected: logo asset for clip 0, a barista photo for clip 1, nothing for clip 2.
+
 ```json
 {
   "storySummary": "A dog enthusiastically orders a coffee, gets confused by the menu, and dramatically enjoys its first sip.",
   "clips": [
     {
       "index": 0,
-      "prompt": "A golden retriever wearing a tiny scarf pushes open the door of a cozy coffee shop with its paw, bell jingling. The dog trots eagerly toward the counter, tail wagging. Warm morning light streams through the windows. The coffee shop logo is visible on the window.",
+      "prompt": "A golden retriever wearing a tiny scarf pushes open the door of a cozy coffee shop with its paw, bell jingling. The dog trots eagerly toward the counter, tail wagging. The coffee shop logo from @image1 is clearly visible on the storefront window. Warm morning light.",
       "continuity": "none",
       "references": ["<logo-asset-id>"],
       "startImageExport": "<logo-asset-id>"
     },
     {
       "index": 1,
-      "prompt": "The golden retriever stands on its hind legs at the counter, tilting its head in confusion at the chalkboard menu above. A barista cat in an apron watches with raised eyebrows. The dog's eyes dart back and forth between options, clearly overwhelmed. Comedic head-tilt energy.",
+      "prompt": "Continuing from @image1 (the golden retriever at the counter), the dog stands on its hind legs, tilting its head in confusion at the chalkboard menu. The barista from @image2 watches with raised eyebrows. The dog's eyes dart back and forth between options. Comedic head-tilt energy.",
       "continuity": "last_frame",
-      "sourceClipIndex": 0
+      "sourceClipIndex": 0,
+      "references": ["<barista-photo-asset-id>"]
     },
     {
       "index": 2,
-      "prompt": "The golden retriever is now sitting at a small table, holding a steaming coffee cup between its paws. It takes a careful sip, eyes go wide with delight, ears perk up, and the tail starts wagging furiously. The dog looks around as if discovering the meaning of life. Heartwarming and funny.",
+      "prompt": "Continuing from @image1 (the golden retriever at the counter), the dog is now sitting at a small table, holding a steaming coffee cup between its paws. It takes a careful sip, eyes go wide with delight, ears perk up, and the tail starts wagging furiously. Heartwarming and funny.",
       "continuity": "last_frame",
-      "sourceClipIndex": 1
+      "sourceClipIndex": 1,
+      "references": []
     }
   ]
 }
 ```
 
-Notice how each clip's prompt describes the NEXT thing that happens — the story flows continuously. Clip 2 picks up where clip 1 left off (dog at the counter, having just entered), and clip 3 picks up from clip 2 (dog now sitting with coffee, having been at the counter).
+Notice:
+- Each clip's prompt describes the NEXT thing that happens — the story flows continuously.
+- Clip 1's prompt references `@image1` (the last frame from clip 0) and `@image2` (the barista photo the user selected). The `references` field carries the user's selected asset id.
+- Clip 2 has no user-selected assets, so `@image1` is just the last frame from clip 1.
+- `sourceClipIndex` is set for every `last_frame` clip.
 
 **For clips with `assetMode: "ai"`**, don't assign brand assets — let the script generate seed frames from your prompt.
 
 **`sourceClipIndex` is REQUIRED for every `last_frame` clip.** Set it to the index of the prior clip (e.g., clip 1's sourceClipIndex is 0, clip 2's is 1, etc.).
+
+**`references` MUST include every asset the user selected for that clip** (from `automation_request.json`'s `brandAssets` and `uploadedAssets`). If you omit them, they won't appear in the video.

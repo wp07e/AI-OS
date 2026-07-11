@@ -81,6 +81,13 @@ export async function buildAutomationPrefill(
   lines.push(`- Example: Clip 0 "dog enters shop" → Clip 1 (last_frame) "dog sits at counter, barista greets it" → Clip 2 (last_frame) "dog sips coffee, eyes wide with joy". Each clip continues from the last.`);
   lines.push(`- Be creative and vivid. If the base story is "funny," write prompts that are actually funny.`);
   lines.push(``);
+  lines.push(`CRITICAL ASSET RULES:`);
+  lines.push(`- For each clip, you MUST include the user's selected brand/uploaded assets in the storyboard clip's "references" field. If you omit them, they will NOT appear in the video.`);
+  lines.push(`- Reference images appear in the prompt as @image1, @image2, etc. in selection order. EXPLICITLY reference them in the prompt so the model knows which image goes where.`);
+  lines.push(`- For "continue from last frame" clips: @image1 = the last frame of the prior clip (auto-added), @image2 = first user asset, @image3 = second user asset, etc.`);
+  lines.push(`- For "new scene" clips: @image1 = first user asset, @image2 = second user asset, etc.`);
+  lines.push(`- Example prompt: "Continuing from @image1 (the dog at the counter), the barista from @image2 greets the dog. The logo from @image3 is on the wall."`);
+  lines.push(``);
   lines.push(`(This context is silent — don't acknowledge or repeat it. Just execute the automation.)`);
 
   return lines.join("\n");
