@@ -136,6 +136,31 @@ export async function POST(
     );
   }
 
+  // ── Write "starting" state immediately ──────────────────────────────────
+  // The script takes several seconds to start (uv run cold start + Python
+  // imports + GrokClient init). During that gap, state.json still reads the
+  // prior phase, so the UI shows no feedback and chat stays enabled. We write
+  // a "starting" phase here so the canvas disables chat + form within the next
+  // 2.5s poll. The script will overwrite this with "preparing" when it enters
+  // the op handler.
+  const startingState = JSON.stringify({
+    phase: "starting",
+    lastUpdated: new Date().toISOString(),
+    errors: [],
+    active: { op, label: "Starting…" },
+  });
+  const stateWriteCmd = `python3 -c "
+import json, os
+path = '${instance.folder}/state.json'
+state = {}
+try:
+    with open(path) as f: state = json.load(f)
+except: pass
+state.update(json.loads('''${startingState.replace(/'/g, "\\'")}'''))
+with open(path, 'w') as f: json.dump(state, f, indent=2)
+"`;
+  await execInContainer(row, ["bash", "-lc", stateWriteCmd], { user: "appuser" }).catch(() => {});
+
   // ── Launch the script (fire-and-forget) ─────────────────────────────────
   // `--project /app/video` tells uv to resolve deps from that dir's pyproject
   // (xai-sdk, httpx). The script itself takes the instance folder + request.

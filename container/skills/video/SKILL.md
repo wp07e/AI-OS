@@ -149,3 +149,176 @@ Omit `clipIndices` to assemble all included clips in order.
 Before acting, read `memory.md` and `state.json` in the instance folder to pick up where a previous session left off. When you pause or finish, append a short handoff note to `memory.md`.
 
 All paths are relative to the instance folder unless absolute.
+
+---
+
+## Automation Mode
+
+When the user triggers an automation (via the ✨ AI icon on the video lane), you receive a chat message with automation context prepended. The message tells you to run a video automation.
+
+### What you do:
+
+1. Read `automation_request.json` from the instance folder — it contains the full configuration (clip count, duration, resolution, quality, per-clip assets, base story).
+2. Read `brand_selection.json` to see which brand assets are available for this lane.
+3. For each asset the user assigned to clips (brand assets or uploads), call `grok.chat_with_vision` to understand what the asset is (logo, photo, character, scene, etc.). Pass the asset path from `/workspace/brand/assets/<id>.<ext>` or the instance's `uploads/` folder.
+4. Write `storyboard.json` to the instance folder with per-clip prompts based on:
+   - The base story line (if provided)
+   - Your understanding of the analyzed assets
+   - Per-clip hint prompts (if the user provided them)
+   - Continuity settings (none / last_frame)
+5. Post a progress message to chat: "Analyzed N assets, wrote storyboard for N clips. Starting generation..."
+6. Run the script:
+   ```bash
+   uv run --project /app/video python /app/video/run.py '<instance_folder>' --request automation_request.json
+   ```
+   Use the fire-and-forget form (nohup ... &) since generation takes a long time.
+
+### What you do NOT do:
+
+- You do NOT call generation tools (`grok.generate_video`, `grok.generate_image`, `grok.extend_video`)
+- You do NOT call ffmpeg
+- You do NOT write `state.json` (the script owns that)
+- The ONLY new tool you use is `grok.chat_with_vision` for asset analysis
+
+### storyboard.json format
+
+```json
+{
+  "clips": [
+    {
+      "index": 0,
+      "prompt": "Detailed shot description based on the story and analyzed assets...",
+      "quality": "low",
+      "settings": { "duration": 6, "aspect_ratio": "16:9", "resolution": "720p" },
+      "continuity": "none",
+      "references": ["<brand-asset-id>", "..."],
+      "startImageExport": "<brand-asset-id or null>",
+      "seedPrompt": null
+    },
+    {
+      "index": 1,
+      "prompt": "Next shot description...",
+      "quality": "low",
+      "settings": { "duration": 6, "aspect_ratio": "16:9", "resolution": "720p" },
+      "continuity": "last_frame",
+      "sourceClipIndex": 0,
+      "references": [],
+      "seedPrompt": null
+    }
+  ],
+  "storySummary": "One-sentence summary of the overall story",
+  "analyzedAssets": {
+    "<brand-asset-id>": "Description of what the asset depicts"
+  }
+}
+```
+
+Each clip's fields map directly to the `request.json` shape the script's `generate_video` op understands. The `references` field takes brand asset ids; the script resolves them to file paths. Use `startImageExport` when a specific asset should be the starting frame (image-to-video).
+
+**CRITICAL — You MUST carry the user's selected assets into the storyboard.** For each clip, look at the corresponding clip in `automation_request.json` — if the user selected brand assets (`brandAssets`) or uploads (`uploadedAssets`), you MUST include those asset ids in the storyboard clip's `references` field. If you omit them, the user's explicit asset selections will not appear in the video.
+
+### Reference images and the @imageN convention
+
+When a clip has reference images (either user-selected assets or a last-frame starting image), the script passes them to the video model. The model sees them in selection order as `@image1`, `@image2`, `@image3`, etc. You should reference them explicitly in the prompt so the model knows which image to use where.
+
+**For `last_frame` clips:** The prior clip's last frame is automatically added as the FIRST reference. So:
+- `@image1` = the last frame of the prior clip (the visual starting point)
+- `@image2` = the first user-selected asset for this clip
+- `@image3` = the second user-selected asset for this clip
+- etc.
+
+**For `none` clips (new scene):** No auto-added last frame, so:
+- `@image1` = the first user-selected asset for this clip
+- `@image2` = the second user-selected asset for this clip
+- etc.
+
+**Example prompt using references:**
+```
+"@image1 (the golden retriever from the last shot) sits at the counter.
+The barista cat in @image2 greets the dog warmly. The coffee shop logo
+from @image3 is visible on the chalkboard menu behind them."
+```
+
+Without these explicit `@imageN` references, the model may not know which image to focus on or where to place them.
+
+### ASSET SCOPING — READ CAREFULLY
+
+**CRITICAL: Each clip's prompt can ONLY reference assets assigned to THAT clip.** Do not mention, describe, or introduce assets from other clips.
+
+When writing the story, you know all assets for all clips upfront. But the story must respect asset boundaries — an asset that appears in clip 3 should NOT be mentioned in clip 1's prompt. The story should be structured so that each asset is introduced in the clip it belongs to.
+
+**Why:** The user assigned specific assets to specific clips intentionally. If clip 1 has a cat photo and clip 2 has a coffee pouch photo, clip 1 should be a cat story only. The coffee pouch is introduced in clip 2 when it becomes available as a reference image. If you mention the coffee pouch in clip 1, the model will try to render it — but it has no reference image for it, so the result will be wrong.
+
+**How to scope:**
+1. Before writing each clip's prompt, check which assets are assigned to THAT clip (from `automation_request.json`).
+2. Write the prompt using ONLY those assets (via `@imageN`) plus whatever was established in prior clips' stories.
+3. If an asset hasn't appeared yet (it's in a future clip), do NOT reference it — even descriptively.
+4. Structure the story so that new elements are introduced naturally when their clip arrives.
+
+**Example of CORRECT scoping (clip 1: cat photo, clip 2: coffee pouch photo):**
+- Clip 1: "@image1 (the orange tabby kitten) plays in a sunny meadow, chasing butterflies." ← Only the cat. No coffee pouch.
+- Clip 2: "Continuing from @image1 (the kitten in the meadow), the kitten discovers @image2 (a coffee pouch) sitting in the grass. It sniffs it curiously." ← The coffee pouch is introduced HERE, in the clip where it's available.
+
+**Example of INCORRECT scoping (what NOT to do):**
+- Clip 1: "@image1 (the kitten) finds a coffee pouch in the meadow and bats it around." ← WRONG: the coffee pouch is not a reference for clip 1. It belongs to clip 2.
+
+### Story writing guidelines — READ CAREFULLY
+
+**CRITICAL: The clips must form ONE connected story, not independent scenes.**
+
+Follow this process:
+
+1. **Write the full story arc FIRST.** Before writing any individual clip prompts, decide the complete narrative from beginning to end. What happens in clip 1 flows into clip 2, which flows into clip 3, etc. Think of it as a single short film broken into shots — not a collection of unrelated videos.
+
+2. **Then break the story into per-clip prompts.** Each clip's prompt describes one shot/segment of that continuous story. A viewer watching the clips back-to-back should see a coherent narrative unfold.
+
+3. **For clips with `continuity: "last_frame"`:** The prompt MUST describe what happens NEXT — continuing directly from where the prior clip ended. The prior clip's last frame becomes the visual starting point (the script handles this automatically), so your prompt should describe the NEXT action, not restart the scene. You MUST also set `sourceClipIndex` to the prior clip's index.
+
+4. **For clips with `continuity: "none"`:** The prompt starts a fresh scene. This is a hard cut — the visual and narrative can shift entirely.
+
+5. **Be creative.** If the base story is "funny," write prompts that are actually funny — comedic timing, visual gags, character reactions. The AI generates what you describe, so make it vivid and entertaining.
+
+**Example — 3-clip connected story (base story: "funny dog at a coffee shop"):**
+
+User selected: logo asset for clip 0, a barista photo for clip 1, nothing for clip 2.
+
+```json
+{
+  "storySummary": "A dog enthusiastically orders a coffee, gets confused by the menu, and dramatically enjoys its first sip.",
+  "clips": [
+    {
+      "index": 0,
+      "prompt": "A golden retriever wearing a tiny scarf pushes open the door of a cozy coffee shop with its paw, bell jingling. The dog trots eagerly toward the counter, tail wagging. The coffee shop logo from @image1 is clearly visible on the storefront window. Warm morning light.",
+      "continuity": "none",
+      "references": ["<logo-asset-id>"],
+      "startImageExport": "<logo-asset-id>"
+    },
+    {
+      "index": 1,
+      "prompt": "Continuing from @image1 (the golden retriever at the counter), the dog stands on its hind legs, tilting its head in confusion at the chalkboard menu. The barista from @image2 watches with raised eyebrows. The dog's eyes dart back and forth between options. Comedic head-tilt energy.",
+      "continuity": "last_frame",
+      "sourceClipIndex": 0,
+      "references": ["<barista-photo-asset-id>"]
+    },
+    {
+      "index": 2,
+      "prompt": "Continuing from @image1 (the golden retriever at the counter), the dog is now sitting at a small table, holding a steaming coffee cup between its paws. It takes a careful sip, eyes go wide with delight, ears perk up, and the tail starts wagging furiously. Heartwarming and funny.",
+      "continuity": "last_frame",
+      "sourceClipIndex": 1,
+      "references": []
+    }
+  ]
+}
+```
+
+Notice:
+- Each clip's prompt describes the NEXT thing that happens — the story flows continuously.
+- Clip 1's prompt references `@image1` (the last frame from clip 0) and `@image2` (the barista photo the user selected). The `references` field carries the user's selected asset id.
+- Clip 2 has no user-selected assets, so `@image1` is just the last frame from clip 1.
+- `sourceClipIndex` is set for every `last_frame` clip.
+
+**For clips with `assetMode: "ai"`**, don't assign brand assets — let the script generate seed frames from your prompt.
+
+**`sourceClipIndex` is REQUIRED for every `last_frame` clip.** Set it to the index of the prior clip (e.g., clip 1's sourceClipIndex is 0, clip 2's is 1, etc.).
+
+**`references` MUST include every asset the user selected for that clip** (from `automation_request.json`'s `brandAssets` and `uploadedAssets`). If you omit them, they won't appear in the video.

@@ -6,6 +6,7 @@ import { WorkRail } from "./WorkRail";
 import { PhasePill } from "./PhasePill";
 import { BrandStudio } from "../(library)/brand/BrandStudio";
 import { BrandWizard } from "../(workflow)/carousel/BrandWizard";
+import { AutomationWizard } from "../(workflow)/video/AutomationWizard";
 import { getWorkflow } from "@/lib/workflows/registry";
 import type { WorkflowState } from "@/lib/workflows/types";
 import { useAgentChat, type ChatTransport } from "@/lib/hooks/useAgentChat";
@@ -77,6 +78,7 @@ export function AppShell() {
   // wizard saves so badges update live.
   const [brandApplied, setBrandApplied] = useState<Record<string, boolean>>({});
   const [brandWizardInstance, setBrandWizardInstance] = useState<WorkflowInstance | null>(null);
+  const [automationWizardInstance, setAutomationWizardInstance] = useState<WorkflowInstance | null>(null);
 
   const refreshBrandApplied = useCallback(async () => {
     try {
@@ -171,6 +173,7 @@ export function AppShell() {
           onSelect={selectInstance}
           onSelectLibrary={selectLibrary}
           onOpenBrandWizard={(inst) => setBrandWizardInstance(inst)}
+          onOpenAutomationWizard={(inst) => setAutomationWizardInstance(inst)}
           onRefresh={refreshInstances}
           loading={loadingInstances}
         />
@@ -205,6 +208,15 @@ export function AppShell() {
             }}
           />
         )}
+
+        {/* Per-lane automation wizard modal (video lanes only). Same shell-level
+            overlay pattern as the brand wizard. */}
+        {automationWizardInstance && (
+          <AutomationWizard
+            instanceId={automationWizardInstance.id}
+            onClose={() => setAutomationWizardInstance(null)}
+          />
+        )}
       </GenerationBusyContext.Provider>
     </AgentChatContext.Provider>
   );
@@ -236,13 +248,17 @@ function CanvasArea({
 
   // Signal generation-busy to the shell so the AgentPanel can disable chat
   // during background script runs (video workflow). Only video-style phases
-  // (preparing/generating/downloading/assembling) count as "busy" — carousel
-  // phases flow through the agent chat and are already gated by chat.busy.
+  // (starting/preparing/generating/downloading/assembling/automating) count as
+  // "busy" — carousel phases flow through the agent chat and are already gated
+  // by chat.busy. "starting" is written by the routes immediately to bridge the
+  // gap before the script's first state write.
   const isGenBusy =
+    phase === "starting" ||
     phase === "preparing" ||
     phase === "generating" ||
     phase === "downloading" ||
-    phase === "assembling";
+    phase === "assembling" ||
+    phase === "automating";
   useEffect(() => {
     onGenerationBusyChange(
       isGenBusy

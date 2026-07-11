@@ -101,6 +101,20 @@ export interface FinalVideo {
   builtAt: string;
 }
 
+/** Progress tracking for an automation run. Written by the script's
+ *  _do_automate op into state.json["automation"]. The canvas reads it
+ *  to render a progress bar during long automation runs. */
+export interface AutomationProgress {
+  totalClips: number;
+  completedClips: number;
+  failedClips: number;
+  currentClip: number;
+  /** "preparing" | "generating" | "assembling" | "complete" */
+  phase: string;
+  startedAt: string;
+  estimatedMinutes?: number;
+}
+
 export interface VideoState extends WorkflowState {
   /** Active tab (advisory; the canvas also keeps its own UI state). */
   mode?: "video" | "image";
@@ -111,6 +125,8 @@ export interface VideoState extends WorkflowState {
   images: GeneratedImage[];
   /** Present once Assemble has produced exports/final.mp4. */
   finalVideo?: FinalVideo | null;
+  /** Present during an automation run (op: "automate"). */
+  automation?: AutomationProgress | null;
   /** Files present in the instance folder (name → true). From the workspace listing. */
   files: Record<string, boolean>;
   /** Rendered exports, relative paths. */

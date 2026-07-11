@@ -1,7 +1,7 @@
 "use client";
 
 import { useWorkspaceState } from "@/lib/hooks/useWorkspaceState";
-import type { ClipStatus, GeneratedImage, VideoClip, VideoState } from "./types";
+import type { AutomationProgress, ClipStatus, GeneratedImage, VideoClip, VideoState } from "./types";
 
 /**
  * Video Studio state observer. Wraps the generic focus-aware poller with a
@@ -29,6 +29,7 @@ export function useVideoState(instanceId: string, folder: string) {
       clips: parseClips(raw.clips, raw.exports),
       images: parseImages(raw.images, raw.exports),
       finalVideo: parseFinalVideo(raw.finalVideo),
+      automation: parseAutomation(raw.automation),
       files: raw.files ?? {},
       exports: raw.exports ?? [],
     }),
@@ -165,4 +166,19 @@ function asString(v: unknown): string | undefined {
 
 function asStringArray(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+}
+
+function parseAutomation(raw: unknown): AutomationProgress | null {
+  if (!raw || typeof raw !== "object") return null;
+  const a = raw as Record<string, unknown>;
+  if (typeof a.totalClips !== "number") return null;
+  return {
+    totalClips: a.totalClips,
+    completedClips: typeof a.completedClips === "number" ? a.completedClips : 0,
+    failedClips: typeof a.failedClips === "number" ? a.failedClips : 0,
+    currentClip: typeof a.currentClip === "number" ? a.currentClip : 0,
+    phase: typeof a.phase === "string" ? a.phase : "preparing",
+    startedAt: typeof a.startedAt === "string" ? a.startedAt : new Date().toISOString(),
+    estimatedMinutes: typeof a.estimatedMinutes === "number" ? a.estimatedMinutes : undefined,
+  };
 }

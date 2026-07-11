@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -51,6 +52,14 @@ from models import (  # noqa: E402
 
 def _read_request(folder: str, request_name: str) -> dict:
     path = os.path.join(folder, request_name)
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _read_storyboard(folder: str) -> dict:
+    """Read storyboard.json from the instance folder (written by the agent
+    after it analyzes assets with grok.chat_with_vision)."""
+    path = os.path.join(folder, "storyboard.json")
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -262,70 +271,94 @@ def _resolve_starting_frame(
     return None, extras
 
 
-def _do_video(folder: str, req: dict, client: GrokClient) -> None:
-    settings = req.get("settings", {})
-    quality = req.get("quality", "low")
+def _generate_single_clip(
+    folder: str,
+    clip_spec: dict,
+    client: GrokClient,
+    existing_clips: list[dict] | None = None,
+) -> dict:
+    """Generate a single video clip from a clip spec.
+
+    This is the core generation logic, extracted from _do_video so the
+    automation loop can call it repeatedly. Does NOT write state.json —
+    the caller is responsible for state updates.
+
+    Args:
+        folder: Instance folder path.
+        clip_spec: Dict with keys matching request.json for generate_video
+            (prompt, quality, settings, references, continuity,
+             sourceClipIndex, seedPrompt, startImageExport).
+        client: GrokClient instance.
+        existing_clips: Clips already in state (for last_frame continuity
+            resolution). If None, reads from state.json.
+
+    Returns:
+        A clip dict (the same shape _do_video writes to clips[]).
+    """
+    settings = clip_spec.get("settings", {})
+    quality = clip_spec.get("quality", "low")
     resolution = clamp_video_resolution(quality, settings.get("resolution", "720p"))
     duration = settings.get("duration")
     aspect = settings.get("aspect_ratio")
-    prompt = req.get("prompt", "")
+    prompt = clip_spec.get("prompt", "")
 
     state = S.read_state(folder)
-    new_index = S.next_clip_index(state.get("clips", []))
+    clips = existing_clips if existing_clips is not None else state.get("clips", [])
+    new_index = S.next_clip_index(clips)
     num = S.clip_num(new_index)
 
-    _set_active(folder, "generate_video", f"Generating clip {new_index + 1}", target_index=new_index)
+    # Merge existing_clips into state so _resolve_starting_frame can find the
+    # prior clip's localPath for last_frame continuity resolution. During the
+    # automation loop, the in-memory generated_clips list is the source of truth
+    # (state.json on disk may be stale or not yet written for the latest clip).
+    if existing_clips is not None:
+        state["clips"] = existing_clips
 
-    frame_path, extras = _resolve_starting_frame(folder, req, state, client, quality)
-
-    S.write_state(folder, "generating", active={"op": "generate_video", "label": f"Generating clip {new_index + 1}", "targetIndex": new_index})
+    frame_path, extras = _resolve_starting_frame(folder, clip_spec, state, client, quality)
 
     # The xAI API does NOT allow both `image` (starting frame) and
-    # `reference_images` in the same call — they are mutually exclusive modes:
-    #   - image = image-to-video (animate this specific frame)
-    #   - reference_images = reference-to-video (text-to-video guided by refs)
-    # When we have BOTH a starting frame and user-selected references, we merge
-    # the starting frame into the references list (as @image1) and use
-    # reference-to-video mode. The prompt guides the action.
-    ref_ids = [r for r in req.get("references", []) if r != req.get("startImageExport")]
+    # `reference_images` in the same call — they are mutually exclusive modes.
+    # When both are present, merge the starting frame into the references list
+    # (as @image1) and use reference-to-video mode. The prompt guides the action.
+    ref_ids = [r for r in clip_spec.get("references", []) if r != clip_spec.get("startImageExport")]
     user_refs = _resolve_brand_assets(folder, ref_ids)
 
+    # Safety net: check for @imageN overflow in the prompt. The prompt may
+    # reference @image1, @image2, etc. — if N exceeds the total available
+    # reference images, the model will try to render an image it doesn't have.
+    # We count: 1 for the last frame (if present) + len(user_refs).
+    total_ref_slots = (1 if frame_path else 0) + len(user_refs)
+    if total_ref_slots > 0:
+        referenced = re.findall(r"@image(\d+)", prompt)
+        overflow = [int(n) for n in referenced if int(n) > total_ref_slots]
+        if overflow:
+            S.append_memory(
+                folder,
+                f"⚠️ Clip {new_index + 1}: prompt references @image{overflow[0]} but only "
+                f"{total_ref_slots} reference image(s) available. The model may render incorrectly."
+            )
+
     if frame_path and user_refs:
-        # Both present → merge: starting frame becomes the first reference.
         all_refs = [frame_path] + user_refs
         result = client.generate_video(
-            prompt=prompt,
-            quality=quality,
-            resolution=resolution,
-            duration=duration,
-            aspect_ratio=aspect,
-            image_path=None,
-            reference_paths=all_refs,
+            prompt=prompt, quality=quality, resolution=resolution,
+            duration=duration, aspect_ratio=aspect,
+            image_path=None, reference_paths=all_refs,
         )
     elif frame_path:
-        # Starting frame only → image-to-video.
         result = client.generate_video(
-            prompt=prompt,
-            quality=quality,
-            resolution=resolution,
-            duration=duration,
-            aspect_ratio=aspect,
-            image_path=frame_path,
-            reference_paths=None,
+            prompt=prompt, quality=quality, resolution=resolution,
+            duration=duration, aspect_ratio=aspect,
+            image_path=frame_path, reference_paths=None,
         )
     else:
-        # No starting frame → reference-to-video (or pure text-to-video if no refs).
         result = client.generate_video(
-            prompt=prompt,
-            quality=quality,
-            resolution=resolution,
-            duration=duration,
-            aspect_ratio=aspect,
-            image_path=None,
-            reference_paths=user_refs if user_refs else None,
+            prompt=prompt, quality=quality, resolution=resolution,
+            duration=duration, aspect_ratio=aspect,
+            image_path=None, reference_paths=user_refs if user_refs else None,
         )
 
-    S.write_state(folder, "downloading")
+    # Download + post-process
     local_mp4 = os.path.join("exports", f"clip-{num}.mp4")
     download(result.url, os.path.join(folder, local_mp4))
 
@@ -342,18 +375,18 @@ def _do_video(folder: str, req: dict, client: GrokClient) -> None:
     if duration_val is None:
         duration_val = ff.ffprobe_duration(os.path.join(folder, local_mp4))
 
-    clip = {
+    return {
         "index": new_index,
         "prompt": prompt,
         "sourceType": extras.get("sourceType", "text"),
         "quality": quality,
-        "continuity": req.get("continuity", "none"),
+        "continuity": clip_spec.get("continuity", "none"),
         "seedFromClip": extras.get("seedFromClip"),
         "seedPrompt": extras.get("seedPrompt"),
         "seedImagePath": extras.get("seedImagePath"),
         "settings": settings,
-        "references": req.get("references", []),
-        "startImageExport": req.get("startImageExport"),
+        "references": clip_spec.get("references", []),
+        "startImageExport": clip_spec.get("startImageExport"),
         "included": True,
         "status": "ready",
         "localPath": local_mp4,
@@ -362,13 +395,54 @@ def _do_video(folder: str, req: dict, client: GrokClient) -> None:
         "duration": duration_val,
     }
 
+
+def _generate_clip_with_retry(
+    folder: str,
+    clip_spec: dict,
+    client: GrokClient,
+    max_retries: int = 3,
+    existing_clips: list[dict] | None = None,
+) -> dict | None:
+    """Generate a single clip with retry logic.
+
+    Returns the clip dict on success, or None after max_retries failures.
+    Non-retryable errors (invalid prompt, missing assets) fail immediately.
+    """
+    last_error: Exception | None = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            return _generate_single_clip(folder, clip_spec, client, existing_clips)
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            # Non-retryable: these won't get better with retries.
+            if any(kw in err_str for kw in ["invalid", "unauthorized", "forbidden", "not found"]):
+                S.append_memory(folder, f"❌ Clip {clip_spec.get('index', '?')+1} failed (non-retryable): {e}")
+                return None
+            if attempt < max_retries:
+                S.append_memory(folder, f"↻ Clip {clip_spec.get('index', '?')+1} attempt {attempt}/{max_retries} failed: {e}, retrying...")
+            else:
+                S.append_memory(folder, f"⚠️ Clip {clip_spec.get('index', '?')+1} failed after {max_retries} attempts: {e}")
+    return None
+
+
+def _do_video(folder: str, req: dict, client: GrokClient) -> None:
+    """Generate a single video clip (manual mode). Wraps _generate_single_clip
+    with state management so the canvas sees progress."""
+    new_index = S.next_clip_index(S.read_state(folder).get("clips", []))
+    _set_active(folder, "generate_video", f"Generating clip {new_index + 1}", target_index=new_index)
+    S.write_state(folder, "generating", active={"op": "generate_video", "label": f"Generating clip {new_index + 1}", "targetIndex": new_index})
+
+    clip = _generate_single_clip(folder, req, client)
+
+    state = S.read_state(folder)
     clips = state.get("clips", [])
     clips.append(clip)
     S.write_state(folder, "complete", clips=clips, active=None, mode="video")
     S.append_memory(
         folder,
-        f"🎬 Generated clip {new_index + 1} ({extras.get('sourceType', 'text')}, {quality}). "
-        f"Prompt: {prompt[:80]}",
+        f"🎬 Generated clip {new_index + 1} ({clip.get('sourceType', 'text')}, {clip.get('quality')}). "
+        f"Prompt: {clip.get('prompt', '')[:80]}",
     )
 
 
@@ -521,6 +595,186 @@ def _do_toggle_include(folder: str, req: dict) -> None:
     S.write_state(folder, "complete", clips=clips, active=None)
 
 
+# ── Automate ───────────────────────────────────────────────────────────────
+
+
+def _do_automate(folder: str, req: dict, client: GrokClient) -> None:
+    """Run a full video automation: read storyboard.json, generate all clips
+    with retry logic, skip failures, and assemble the final video.
+
+    The agent writes storyboard.json after analyzing assets with vision.
+    This function reads it and executes the generation deterministically.
+    """
+    storyboard = _read_storyboard(folder)
+    clips_spec = storyboard.get("clips", [])
+    total = len(clips_spec)
+
+    # Safety net: merge per-clip brand/uploaded assets from automation_request.json
+    # into the storyboard clips if the agent omitted them. The agent SHOULD carry
+    # the user's selected assets into the storyboard's "references" field, but if
+    # it doesn't, we inject them here so the user's explicit asset selections are
+    # never silently dropped. This mirrors the sourceClipIndex safety net.
+    try:
+        auto_req = _read_request(folder, "automation_request.json")
+        req_clips = auto_req.get("clips", [])
+        for i, clip_spec in enumerate(clips_spec):
+            if i >= len(req_clips):
+                break
+            rc = req_clips[i]
+            # Only inject if the clip has a non-"ai" asset mode and the storyboard
+            # is missing references (agent forgot to carry them forward).
+            if rc.get("assetMode") == "ai":
+                continue
+            existing_refs = set(clip_spec.get("references", []))
+            added = []
+            for aid in (rc.get("brandAssets") or []):
+                if aid not in existing_refs:
+                    added.append(aid)
+                    existing_refs.add(aid)
+            for upath in (rc.get("uploadedAssets") or []):
+                if upath not in existing_refs:
+                    added.append(upath)
+                    existing_refs.add(upath)
+            if added:
+                clip_spec["references"] = clip_spec.get("references", []) + added
+                S.append_memory(folder, f"ℹ️ Clip {i+1}: injected {len(added)} missing asset(s) from automation_request")
+    except Exception:
+        pass  # Non-fatal — proceed with storyboard as-is
+
+    if total == 0:
+        S.write_state(folder, "complete", active=None, extra={"automation": {
+            "totalClips": 0, "completedClips": 0, "failedClips": 0,
+            "currentClip": 0, "phase": "complete", "startedAt": S._now_iso(),
+        }})
+        S.append_memory(folder, "⚠️ Automation completed with 0 clips (empty storyboard).")
+        return
+
+    S.write_state(folder, "automating", active={
+        "op": "automate", "label": f"Starting automation ({total} clips)"
+    }, extra={"automation": {
+        "totalClips": total, "completedClips": 0, "failedClips": 0,
+        "currentClip": 0, "phase": "preparing", "startedAt": S._now_iso(),
+    }})
+    S.append_memory(folder, f"🤖 Starting automation: {total} clips.")
+
+    generated_clips: list[dict] = []
+    failed = 0
+
+    for i, clip_spec in enumerate(clips_spec):
+        # Update progress before each clip
+        S.write_state(folder, "automating", active={
+            "op": "automate",
+            "label": f"Generating clip {i + 1}/{total}",
+            "targetIndex": i,
+        }, extra={"automation": {
+            "totalClips": total,
+            "completedClips": len(generated_clips),
+            "failedClips": failed,
+            "currentClip": i,
+            "phase": "generating",
+            "startedAt": S._now_iso(),
+        }})
+
+        # Safety net: ensure last_frame clips have sourceClipIndex pointing to the
+        # previous clip. The agent should set this, but if it doesn't, we default
+        # to the immediately preceding clip index so visual continuity is preserved.
+        if clip_spec.get("continuity") == "last_frame" and clip_spec.get("sourceClipIndex") is None:
+            if i > 0:
+                clip_spec["sourceClipIndex"] = i - 1
+                S.append_memory(folder, f"ℹ️ Clip {i+1}: auto-set sourceClipIndex={i-1} for last_frame continuity")
+
+        # Generate with retry. Pass existing clips so last_frame continuity
+        # can resolve the previous clip's path.
+        clip = _generate_clip_with_retry(
+            folder, clip_spec, client, max_retries=3,
+            existing_clips=generated_clips,
+        )
+
+        if clip:
+            generated_clips.append(clip)
+            # Write incremental state so the canvas shows clips as they complete
+            S.write_state(folder, "automating", clips=generated_clips, active={
+                "op": "automate",
+                "label": f"Generated clip {i + 1}/{total}",
+                "targetIndex": i,
+            }, extra={"automation": {
+                "totalClips": total,
+                "completedClips": len(generated_clips),
+                "failedClips": failed,
+                "currentClip": i,
+                "phase": "generating",
+                "startedAt": S._now_iso(),
+            }})
+        else:
+            failed += 1
+
+    # Assemble successful clips
+    if generated_clips:
+        S.write_state(folder, "automating", active={
+            "op": "automate", "label": f"Assembling {len(generated_clips)} clips"
+        }, extra={"automation": {
+            "totalClips": total,
+            "completedClips": len(generated_clips),
+            "failedClips": failed,
+            "currentClip": total - 1,
+            "phase": "assembling",
+            "startedAt": S._now_iso(),
+        }})
+
+        _assemble_automation_clips(folder, generated_clips)
+    else:
+        S.append_memory(folder, "⚠️ No clips generated successfully — skipping assembly.")
+
+    # Final state
+    S.write_state(folder, "complete", clips=generated_clips, active=None, extra={"automation": {
+        "totalClips": total,
+        "completedClips": len(generated_clips),
+        "failedClips": failed,
+        "currentClip": total - 1 if total > 0 else 0,
+        "phase": "complete",
+        "startedAt": S._now_iso(),
+    }})
+
+    summary = storyboard.get("storySummary", "(no summary)")
+    S.append_memory(
+        folder,
+        f"📦 Automation complete: {len(generated_clips)}/{total} clips generated, "
+        f"{failed} failed. Story: {summary[:100]}",
+    )
+
+
+def _assemble_automation_clips(folder: str, clips: list[dict]) -> None:
+    """Assemble generated clips into exports/final.mp4.
+
+    Reuses the ffmpeg concat logic from _do_assemble but operates on an
+    in-memory clips list (the automation loop holds the clips directly,
+    rather than reading from state.json).
+    """
+    paths: list[str] = []
+    for c in clips:
+        if c.get("localPath") and os.path.exists(os.path.join(folder, c["localPath"])):
+            paths.append(os.path.join(folder, c["localPath"]))
+
+    if not paths:
+        S.append_memory(folder, "⚠️ Assembly skipped: no rendered clips found.")
+        return
+
+    final_local = os.path.join("exports", "final.mp4")
+    ff.concat_clips(paths, os.path.join(folder, final_local))
+    duration_val = ff.ffprobe_duration(os.path.join(folder, final_local))
+
+    clip_indices = [c["index"] for c in clips]
+    final_video = {
+        "localPath": final_local,
+        "duration": duration_val,
+        "clipCount": len(paths),
+        "clipIndices": clip_indices,
+        "builtAt": S._now_iso(),
+    }
+    S.write_state(folder, "complete", final_video=final_video, clips=clips, active=None)
+    S.append_memory(folder, f"📦 Assembled final video from {len(paths)} clip(s).")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 
 
@@ -577,6 +831,8 @@ def main() -> int:
             _do_video(folder, req, client)
         elif op == "extend_video":
             _do_extend(folder, req, client)
+        elif op == "automate":
+            _do_automate(folder, req, client)
         else:
             _fail(folder, f"unknown op: {op}")
             return 1
