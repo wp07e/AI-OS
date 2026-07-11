@@ -48,6 +48,30 @@ export async function POST(
     return NextResponse.json({ error: "container not ready" }, { status: 409 });
   }
 
+  // ── Write "starting" state immediately ──────────────────────────────────
+  // The carousel script takes several seconds to start (uv run cold start +
+  // Python imports + Canva MCP client init). During that gap, state.json still
+  // reads the prior phase (awaiting_candidate_selection), so the UI shows no
+  // feedback. We write a "starting" phase so the canvas + chat disable within
+  // the next 2.5s poll. The script overwrites this when it enters its handler.
+  const startingPatch = JSON.stringify({
+    phase: "starting",
+    lastUpdated: new Date().toISOString(),
+    errors: [],
+    active: { op: "resume", label: "Resuming…" },
+  });
+  const stateWriteCmd = `python3 - <<'__STATE_EOF__'
+import json, os
+path = ${JSON.stringify(instance.folder + "/state.json")}
+state = {}
+try:
+    with open(path) as f: state = json.load(f)
+except Exception: pass
+state.update(${startingPatch})
+with open(path, "w") as f: json.dump(state, f, indent=2)
+__STATE_EOF__`;
+  await execInContainer(row, ["bash", "-lc", stateWriteCmd], { user: "appuser" }).catch(() => {});
+
   // Fire-and-forget the resume run. We don't await it — the canvas polls
   // state.json for the phase transition. Use nohup + disown so the exec doesn't
   // tie up the request, and redirect output to a log under the instance folder.

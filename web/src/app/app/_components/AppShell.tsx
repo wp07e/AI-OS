@@ -247,18 +247,29 @@ function CanvasArea({
   const phase = (result?.state as WorkflowState | null)?.phase ?? "unknown";
 
   // Signal generation-busy to the shell so the AgentPanel can disable chat
-  // during background script runs (video workflow). Only video-style phases
-  // (starting/preparing/generating/downloading/assembling/automating) count as
-  // "busy" — carousel phases flow through the agent chat and are already gated
-  // by chat.busy. "starting" is written by the routes immediately to bridge the
-  // gap before the script's first state write.
+  // during background script runs (video + carousel workflows). Covers both
+  // video phases (starting/preparing/generating/...) and carousel phases
+  // (planning/generating_design/...). "starting" is written by the routes
+  // immediately to bridge the gap before the script's first state write.
+  // Note: the initial carousel generation flows through the agent chat and is
+  // already gated by chat.busy; these carousel phases mainly cover the
+  // select-candidate resume path (fire-and-forget, like video).
   const isGenBusy =
+    // Shared / video phases
     phase === "starting" ||
     phase === "preparing" ||
     phase === "generating" ||
     phase === "downloading" ||
     phase === "assembling" ||
-    phase === "automating";
+    phase === "automating" ||
+    // Carousel phases (resume path + agent-driven)
+    phase === "planning" ||
+    phase === "generating_design" ||
+    phase === "resolving_assets" ||
+    phase === "assets_resolved" ||
+    phase === "capturing_template" ||
+    phase === "template_captured" ||
+    phase === "awaiting_candidate_selection";
   useEffect(() => {
     onGenerationBusyChange(
       isGenBusy

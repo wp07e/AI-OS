@@ -117,22 +117,26 @@ export async function POST(
   // changes. We write "starting" here so the canvas disables chat + form
   // within the next 2.5s poll. The script will overwrite this with "automating"
   // when _do_automate begins.
-  const startingState = JSON.stringify({
+  //
+  // Uses a heredoc to write state.json (same safe pattern as
+  // automation_request.json above). We merge with any existing state via a
+  // small python3 script so we don't clobber clips[] or other fields.
+  const startingPatch = JSON.stringify({
     phase: "starting",
     lastUpdated: new Date().toISOString(),
     errors: [],
     active: { op: "automate", label: "Analyzing assets…" },
   });
-  const stateWriteCmd = `python3 -c "
+  const stateWriteCmd = `python3 - <<'__STATE_EOF__'
 import json, os
-path = '${instance.folder}/state.json'
+path = ${JSON.stringify(instance.folder + "/state.json")}
 state = {}
 try:
     with open(path) as f: state = json.load(f)
-except: pass
-state.update(json.loads('''${startingState.replace(/'/g, "\\'")}'''))
-with open(path, 'w') as f: json.dump(state, f, indent=2)
-"`;
+except Exception: pass
+state.update(${startingPatch})
+with open(path, "w") as f: json.dump(state, f, indent=2)
+__STATE_EOF__`;
   await execInContainer(row, ["bash", "-lc", stateWriteCmd], { user: "appuser" }).catch(() => {});
 
   // ── Send the chat message to trigger the agent ──────────────────────────
