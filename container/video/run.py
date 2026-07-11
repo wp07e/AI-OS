@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -321,6 +322,21 @@ def _generate_single_clip(
     # (as @image1) and use reference-to-video mode. The prompt guides the action.
     ref_ids = [r for r in clip_spec.get("references", []) if r != clip_spec.get("startImageExport")]
     user_refs = _resolve_brand_assets(folder, ref_ids)
+
+    # Safety net: check for @imageN overflow in the prompt. The prompt may
+    # reference @image1, @image2, etc. — if N exceeds the total available
+    # reference images, the model will try to render an image it doesn't have.
+    # We count: 1 for the last frame (if present) + len(user_refs).
+    total_ref_slots = (1 if frame_path else 0) + len(user_refs)
+    if total_ref_slots > 0:
+        referenced = re.findall(r"@image(\d+)", prompt)
+        overflow = [int(n) for n in referenced if int(n) > total_ref_slots]
+        if overflow:
+            S.append_memory(
+                folder,
+                f"⚠️ Clip {new_index + 1}: prompt references @image{overflow[0]} but only "
+                f"{total_ref_slots} reference image(s) available. The model may render incorrectly."
+            )
 
     if frame_path and user_refs:
         all_refs = [frame_path] + user_refs

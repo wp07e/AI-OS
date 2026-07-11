@@ -241,6 +241,27 @@ from @image3 is visible on the chalkboard menu behind them."
 
 Without these explicit `@imageN` references, the model may not know which image to focus on or where to place them.
 
+### ASSET SCOPING — READ CAREFULLY
+
+**CRITICAL: Each clip's prompt can ONLY reference assets assigned to THAT clip.** Do not mention, describe, or introduce assets from other clips.
+
+When writing the story, you know all assets for all clips upfront. But the story must respect asset boundaries — an asset that appears in clip 3 should NOT be mentioned in clip 1's prompt. The story should be structured so that each asset is introduced in the clip it belongs to.
+
+**Why:** The user assigned specific assets to specific clips intentionally. If clip 1 has a cat photo and clip 2 has a coffee pouch photo, clip 1 should be a cat story only. The coffee pouch is introduced in clip 2 when it becomes available as a reference image. If you mention the coffee pouch in clip 1, the model will try to render it — but it has no reference image for it, so the result will be wrong.
+
+**How to scope:**
+1. Before writing each clip's prompt, check which assets are assigned to THAT clip (from `automation_request.json`).
+2. Write the prompt using ONLY those assets (via `@imageN`) plus whatever was established in prior clips' stories.
+3. If an asset hasn't appeared yet (it's in a future clip), do NOT reference it — even descriptively.
+4. Structure the story so that new elements are introduced naturally when their clip arrives.
+
+**Example of CORRECT scoping (clip 1: cat photo, clip 2: coffee pouch photo):**
+- Clip 1: "@image1 (the orange tabby kitten) plays in a sunny meadow, chasing butterflies." ← Only the cat. No coffee pouch.
+- Clip 2: "Continuing from @image1 (the kitten in the meadow), the kitten discovers @image2 (a coffee pouch) sitting in the grass. It sniffs it curiously." ← The coffee pouch is introduced HERE, in the clip where it's available.
+
+**Example of INCORRECT scoping (what NOT to do):**
+- Clip 1: "@image1 (the kitten) finds a coffee pouch in the meadow and bats it around." ← WRONG: the coffee pouch is not a reference for clip 1. It belongs to clip 2.
+
 ### Story writing guidelines — READ CAREFULLY
 
 **CRITICAL: The clips must form ONE connected story, not independent scenes.**

@@ -51,25 +51,36 @@ export async function buildAutomationPrefill(
 
   const clips = req.clips as Array<Record<string, unknown>> | undefined;
   if (clips && Array.isArray(clips)) {
+    lines.push(``);
+    lines.push(`Per-clip asset slots (what @imageN maps to for each clip):`);
     for (const clip of clips) {
       const idx = clip.index;
-      const continuity = clip.continuity === "last_frame" ? "continue from last frame" : "new scene";
+      const isLastFrame = clip.continuity === "last_frame";
+      const continuity = isLastFrame ? "continue from last frame" : "new scene";
       const mode = clip.assetMode;
       const brandAssets = (clip.brandAssets as string[]) ?? [];
       const uploadedAssets = (clip.uploadedAssets as string[]) ?? [];
       const hint = clip.promptHint ? ` hint: "${clip.promptHint}"` : "";
 
-      let assetDesc: string;
       if (mode === "ai") {
-        assetDesc = "AI-created assets (generate your own to fit the story)";
+        lines.push(`- Clip ${idx} (${continuity}): AI-created assets — no @imageN slots. Generate your own visuals.${hint}`);
       } else {
-        const parts: string[] = [];
-        if (brandAssets.length > 0) parts.push(`brand [${brandAssets.join(", ")}]`);
-        if (uploadedAssets.length > 0) parts.push(`uploads [${uploadedAssets.join(", ")}]`);
-        assetDesc = parts.join(", ") || "none";
+        const allAssets = [...brandAssets, ...uploadedAssets];
+        const slots: string[] = [];
+        let slotNum = 1;
+        if (isLastFrame) {
+          slots.push(`@image${slotNum} = last frame of prior clip`);
+          slotNum++;
+        }
+        for (let a = 0; a < allAssets.length; a++) {
+          const isBrand = a < brandAssets.length;
+          const ref = isBrand ? `brand asset ${allAssets[a]}` : `upload ${allAssets[a]}`;
+          slots.push(`@image${slotNum} = ${ref}`);
+          slotNum++;
+        }
+        const slotDesc = slots.length > 0 ? slots.join(", ") : "no reference images";
+        lines.push(`- Clip ${idx} (${continuity}): ${slotDesc}${hint}`);
       }
-
-      lines.push(`- Clip ${idx}: ${continuity}, ${assetDesc}${hint}`);
     }
   }
 
@@ -87,6 +98,11 @@ export async function buildAutomationPrefill(
   lines.push(`- For "continue from last frame" clips: @image1 = the last frame of the prior clip (auto-added), @image2 = first user asset, @image3 = second user asset, etc.`);
   lines.push(`- For "new scene" clips: @image1 = first user asset, @image2 = second user asset, etc.`);
   lines.push(`- Example prompt: "Continuing from @image1 (the dog at the counter), the barista from @image2 greets the dog. The logo from @image3 is on the wall."`);
+  lines.push(``);
+  lines.push(`ASSET SCOPING (CRITICAL):`);
+  lines.push(`- Each clip's prompt can ONLY reference the @imageN slots listed above for THAT clip. Do NOT mention, describe, or introduce assets from other clips — even descriptively.`);
+  lines.push(`- If clip 1 has a cat photo and clip 2 has a coffee pouch, clip 1 is a cat story ONLY. The coffee pouch is introduced in clip 2 where it's available.`);
+  lines.push(`- Structure the story so new elements appear when their clip arrives, not before.`);
   lines.push(``);
   lines.push(`(This context is silent — don't acknowledge or repeat it. Just execute the automation.)`);
 
