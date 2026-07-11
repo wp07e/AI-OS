@@ -31,7 +31,7 @@ The intelligence (skills, MCPs, Canva pipeline) stays inside the per-user contai
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ AI OS                                            literal:[@user ▾]  │
+│ AI OS                                            [@user ▾]  │
 ├───────────────┬──────────────────────────────┬────────────────┤
 │  WORK         │  <active workflow canvas>    │   AGENT        │
 │  ────────     │  (swaps per workflow)        │   (chat,       │

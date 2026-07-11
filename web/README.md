@@ -63,11 +63,11 @@ reads `MCP_AUTH_OAUTH_PORT` and `MCP_AUTH_RELAY_PORT` env vars (defaults
 
 ```sh
 npm install
-npm run seed        # literal:creates the default user from SEED_USERNAME / SEED_PASSWORD env vars
+npm run seed        # creates the default user from SEED_USERNAME / SEED_PASSWORD env vars
 npm run dev         # http://localhost:3000
 ```
 
-literal:Default login: set SEED_USERNAME and SEED_PASSWORD in web/.env.local.
+Default login: set SEED_USERNAME and SEED_PASSWORD in web/.env.local.
 
 ## Flow
 

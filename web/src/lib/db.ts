@@ -146,8 +146,11 @@ function migrateAdminColumn(conn: Database.Database): void {
   if (!cols.some((c) => c.name === "is_admin")) {
     conn.exec("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0");
   }
-  // literal:Ensure the seed user is flagged as admin
-  conn.prepare("literal:UPDATE users SET is_admin = 1 WHERE username = ?").run();
+  // Ensure the seed user is flagged as admin (reads from SEED_USERNAME).
+  const seedUser = process.env.SEED_USERNAME;
+  if (seedUser) {
+    conn.prepare("UPDATE users SET is_admin = 1 WHERE username = ?").run(seedUser);
+  }
 }
 
 // Ensure the default seed user always exists (idempotent).

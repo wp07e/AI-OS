@@ -28,7 +28,7 @@ export function BrandIdentityPanel({ brand, update }: Props) {
             type="text"
             value={brand.name}
             onChange={(e) => update({ name: e.target.value })}
-            placeholder="literal:e.g. Acme, Northwind, your_org"
+            placeholder="e.g. Acme, Northwind, your_org"
             className="mt-1 w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm text-[var(--foreground)] outline-none transition placeholder:text-[var(--muted)]/60 focus:border-indigo-400/50"
           />
         </label>
