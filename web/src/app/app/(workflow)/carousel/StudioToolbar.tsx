@@ -14,6 +14,8 @@ interface Props {
   slideCanvaUrl?: string;
   /** 1-indexed slide number, for the "Open slide N in Canva" label. */
   slideNumber?: number;
+  /** Generation mode: "posts" = individual slides, "deck" = single presentation. */
+  mode?: "posts" | "deck";
 }
 
 /**
@@ -29,7 +31,7 @@ interface Props {
  *  - Generate: before any design exists (kick off the whole pipeline)
  *  - Reset: always (with confirm)
  */
-export function StudioToolbar({ hasDesign, design, slideCanvaUrl, slideNumber }: Props) {
+export function StudioToolbar({ hasDesign, design, slideCanvaUrl, slideNumber, mode }: Props) {
   const chat = useAgentChatContext();
   const [confirmingReset, setConfirmingReset] = useState(false);
   const busy = chat.busy;
@@ -42,6 +44,7 @@ export function StudioToolbar({ hasDesign, design, slideCanvaUrl, slideNumber }:
         canvaUrl={design?.canva_url}
         slideCanvaUrl={slideCanvaUrl}
         slideNumber={slideNumber}
+        mode={mode}
       />
       {showGenerate && (
         <ToolbarButton

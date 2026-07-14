@@ -78,7 +78,12 @@ if HERE not in sys.path:
 
 from brief import Brief, load_brief  # noqa: E402
 from mcp_client import McpClient, McpError  # noqa: E402
-from state import write_state, append_error, write_memory  # noqa: E402
+from state import _read_state, write_state, append_error, write_memory  # noqa: E402
+
+
+def _read_state_field(instance_folder: str, key: str):
+    """Read a single top-level field from state.json, or return None."""
+    return _read_state(instance_folder).get(key)
 
 
 def main(argv: list[str]) -> int:
@@ -184,8 +189,15 @@ def _run_deck(client: McpClient, instance_folder: str, brief: Brief, selected_ca
 
     slides = deck_carousel.run_deck_from_candidate(client, instance_folder, brief, job_id, selected_candidate)
     # Clear the candidates + stash now that selection is consumed.
+    # Preserve the canva_url that deck_carousel wrote into state.json earlier
+    # (it lives on the top-level design dict, not per-slide).
+    _prev_design = _read_state_field(instance_folder, "design")
+    prev_canva_url = (_prev_design or {}).get("canva_url")
+    design_dict = slides[0].get("design_id") and {"design_id": slides[0]["design_id"]} or None
+    if design_dict and prev_canva_url:
+        design_dict["canva_url"] = prev_canva_url
     write_state(instance_folder, "template_captured", mode=brief.mode, slides=slides,
-                design=slides[0].get("design_id") and {"design_id": slides[0]["design_id"]} or None,
+                design=design_dict,
                 candidates=[])
     _finalize(instance_folder, brief, slides, design_ids=[s.get("design_id", "") for s in slides if s.get("design_id")])
     print(f"deck pipeline complete: {len(slides)} slides")

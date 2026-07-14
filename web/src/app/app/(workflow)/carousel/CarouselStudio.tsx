@@ -76,6 +76,7 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
         design={state?.design}
         slideCanvaUrl={selectedSlide?.canva_url}
         slideNumber={selectedSlide ? selectedSlide.index + 1 : undefined}
+        mode={state?.mode}
       />
 
       {(() => {

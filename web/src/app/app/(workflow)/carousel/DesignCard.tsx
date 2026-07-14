@@ -7,21 +7,25 @@ interface Props {
   slideCanvaUrl?: string;
   /** Which slide the per-slide link opens (1-indexed, for the label). */
   slideNumber?: number;
+  /** Generation mode: "posts" = individual slides, "deck" = single presentation. */
+  mode?: "posts" | "deck";
 }
 
 /**
- * "Designed in Canva" link card. Dual-mode:
+ * Canva link card. Dual-mode:
  * - Posts mode: each slide has its own design → "Open slide N in Canva"
- * - Deck mode: one deck → "Open in Canva"
+ * - Deck mode: one presentation → "Open presentation in Canva"
  * Renders nothing if no URL is available yet.
  */
-export function DesignCard({ canvaUrl, slideCanvaUrl, slideNumber }: Props) {
+export function DesignCard({ canvaUrl, slideCanvaUrl, slideNumber, mode }: Props) {
   const url = slideCanvaUrl ?? canvaUrl;
   if (!url) return null;
 
   const label = slideCanvaUrl
     ? `Open slide ${slideNumber ?? ""} in Canva`
-    : "Designed in Canva";
+    : mode === "deck"
+      ? "Open presentation in Canva"
+      : "Designed in Canva";
 
   return (
     <a
