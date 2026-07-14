@@ -9,12 +9,17 @@ interface CanvaStatus {
   connected: boolean;
   /** Re-probe the connection (e.g. after returning from /oauth). */
   refresh: () => void;
+  /** Force-connected to false immediately (e.g. on 401 detection), then
+   *  re-probe after a short delay to allow automatic recovery if the token
+   *  was refreshed in the background. */
+  invalidateCanva: () => void;
 }
 
 const CanvaStatusContext = createContext<CanvaStatus>({
   loading: true,
   connected: false,
   refresh: () => {},
+  invalidateCanva: () => {},
 });
 
 /**
@@ -43,13 +48,20 @@ export function CanvaStatusProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /** Immediately mark disconnected, then re-probe after 2 s so the UI
+   *  recovers automatically if the token was refreshed in the background. */
+  const invalidateCanva = useCallback(() => {
+    setConnected(false);
+    setTimeout(probe, 2000);
+  }, [probe]);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     probe();
   }, [probe]);
 
   return (
-    <CanvaStatusContext.Provider value={{ loading, connected, refresh: probe }}>
+    <CanvaStatusContext.Provider value={{ loading, connected, refresh: probe, invalidateCanva }}>
       {children}
     </CanvaStatusContext.Provider>
   );

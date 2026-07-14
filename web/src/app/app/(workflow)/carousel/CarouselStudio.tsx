@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CanvasProps } from "@/lib/workflows/types";
+import { useCanvaStatus } from "@/app/app/_components/CanvaStatusProvider";
 import { CandidateStrip } from "./CandidateStrip";
 import { Filmstrip } from "./Filmstrip";
 import { SlideCopyPanel } from "./SlideCopyPanel";
@@ -23,6 +24,25 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
   // Poll state is owned by the shell; this component only tracks which slide
   // the user has selected in the filmstrip.
   const [selected, setSelected] = useState<number | null>(null);
+  const [dismissedErrors, setDismissedErrors] = useState<string[]>([]);
+  const { invalidateCanva } = useCanvaStatus();
+
+  // When state.errors contains a Canva 401 / invalid-token message, force the
+  // Canva status to disconnected so the header shows "Connect Canva" and the
+  // WorkRail disables Carousel lanes.
+  const handled401Ref = useRef(false);
+  useEffect(() => {
+    if (!state?.errors?.length) {
+      handled401Ref.current = false;
+      return;
+    }
+    if (handled401Ref.current) return;
+    const has401 = state.errors.some((e) => /401|invalid_token|expired/i.test(e));
+    if (has401) {
+      handled401Ref.current = true;
+      invalidateCanva();
+    }
+  }, [state?.errors, invalidateCanva]);
 
   const slides = useMemo(() => state?.slides ?? [], [state?.slides]);
   const phase = state?.phase ?? "unknown";
@@ -58,11 +78,24 @@ export function CarouselStudio({ instanceId, state }: CanvasProps<CarouselState>
         slideNumber={selectedSlide ? selectedSlide.index + 1 : undefined}
       />
 
-      {state?.errors && state.errors.length > 0 && (
-        <div className="shrink-0 border-b border-red-400/20 bg-red-500/10 px-4 py-2 text-xs text-red-300">
-          {state.errors.join("; ")}
-        </div>
-      )}
+      {(() => {
+        const rawErrors = state?.errors ?? [];
+        const visibleErrors = rawErrors.filter((e) => !dismissedErrors.includes(e));
+        if (visibleErrors.length === 0) return null;
+        return (
+          <div className="flex shrink-0 items-center gap-2 border-b border-red-400/20 bg-red-500/10 px-4 py-2 text-xs text-red-300">
+            <span className="flex-1">{visibleErrors.join("; ")}</span>
+            <button
+              type="button"
+              onClick={() => setDismissedErrors(rawErrors)}
+              className="shrink-0 text-red-300/60 transition hover:text-red-200"
+              aria-label="Dismiss error"
+            >
+              ✕
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Candidate selection (deck mode pause) — replaces the preview area. */}
       {isAwaitingSelection && candidates && candidates.length > 0 ? (
