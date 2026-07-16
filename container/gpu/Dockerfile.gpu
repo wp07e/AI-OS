@@ -1,0 +1,113 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU instance image for the Blender workflow.
+#
+# This is a STANDALONE Dockerfile — it is NOT built as part of the main app
+# container. It produces a Docker image pushed to Docker Hub that vast.ai
+# instances boot from. The image contains everything the onstart.sh script used
+# to install at runtime: Blender, Xvfb, system deps, the blender-mcp addon.
+#
+# This eliminates the 5-7 minute apt/download/install cycle on every new
+# instance. The onstart script (passed via --onstart-cmd at instance creation)
+# only needs to: inject the SSH key, launch Xvfb + Blender, and wait for the
+# socket — a few seconds instead of minutes.
+#
+# Build:
+#   cd container/gpu
+#   docker build -t walkerp07/blender-mcp:latest -f Dockerfile.gpu .
+#
+# Push:
+#   docker push walkerp07/blender-mcp:latest
+#
+# Then set in web/.env:
+#   GPU_IMAGE=walkerp07/blender-mcp:latest
+#
+# Base image: nvidia/cuda runtime (no nvcc — smaller than devel).
+# ─────────────────────────────────────────────────────────────────────────────
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── 1. System dependencies ──────────────────────────────────────────────────
+# These are the same packages from onstart.sh section 1. OpenSSH server is
+# already present in the vast.ai base image (they configure it), but we include
+# openssh-client for completeness. Xvfb + GL libs are required for Blender's
+# GUI context (the blender-mcp addon can't run headless).
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends \
+      xvfb \
+      libgl1 \
+      libxi6 \
+      libxrender1 \
+      libxxf86vm1 \
+      libxfixes3 \
+      libxkbcommon0 \
+      libsm6 \
+      libegl1 \
+      libopengl0 \
+      python3-pip \
+      ca-certificates \
+      curl \
+      xz-utils \
+      openssh-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── 2. Blender 4.5.x ─────────────────────────────────────────────────────────
+# Download and extract Blender to /opt/blender. apt only has 3.0.1 on Ubuntu
+# 22.04, so we fetch from blender.org. The version is pinned for
+# reproducibility — update this arg and rebuild to upgrade.
+ARG BLENDER_VERSION=4.5.11
+ENV BLENDER_VERSION=${BLENDER_VERSION}
+ENV BLENDER_INSTALL_DIR=/opt/blender
+
+RUN BLENDER_MAJOR="${BLENDER_VERSION%.*}" && \
+    DL_URL="https://download.blender.org/release/Blender${BLENDER_MAJOR}/blender-${BLENDER_VERSION}-linux-x64.tar.xz" && \
+    curl -fsSL "$DL_URL" -o /tmp/blender.tar.xz && \
+    mkdir -p "$BLENDER_INSTALL_DIR" && \
+    tar -xf /tmp/blender.tar.xz -C /tmp/ && \
+    cp -a /tmp/blender-${BLENDER_VERSION}-linux-x64/* "$BLENDER_INSTALL_DIR/" && \
+    rm -rf /tmp/blender.tar.xz /tmp/blender-${BLENDER_VERSION}-linux-x64 && \
+    "$BLENDER_INSTALL_DIR/blender" --version
+
+# ── 3. Blender Python deps ───────────────────────────────────────────────────
+# Install `requests` into Blender's bundled Python (the addon uses it for
+# Poly Haven asset downloads). Blender 4.5 ships python3.11 (not "python3")
+# at /opt/blender/4.5/python/bin/python3.11.
+RUN BLENDER_PY=$(find "$BLENDER_INSTALL_DIR" -name "python3.*" -path "*/python/bin/*" 2>/dev/null | head -1) && \
+    if [ -z "$BLENDER_PY" ]; then echo "FATAL: blender python not found"; exit 1; fi && \
+    echo "found blender python: $BLENDER_PY" && \
+    "$BLENDER_PY" -m pip install --quiet requests
+
+# ── 4. blender-mcp addon ─────────────────────────────────────────────────────
+# Install the addon as a single file in the Blender addons directory, matching
+# onstart.sh section 5. The addon is a self-contained single file with its own
+# bl_info, register(), and unregister(). We fetch from GitHub at a pinned ref.
+ARG BLENDER_MCP_REF=main
+ENV ADDON_REF=${BLENDER_MCP_REF}
+
+RUN BLENDER_MAJOR="${BLENDER_VERSION%%.*}" && \
+    BLENDER_MINOR="${BLENDER_VERSION#*.}" && \
+    BLENDER_MINOR="${BLENDER_MINOR%%.*}" && \
+    ADDONS_DIR="/root/.config/blender/${BLENDER_MAJOR}.${BLENDER_MINOR}/scripts/addons" && \
+    mkdir -p "$ADDONS_DIR" && \
+    REF="${BLENDER_MCP_REF}" && \
+    if [ "$REF" = "main" ]; then \
+      REF=$(curl -fsSL "https://api.github.com/repos/ahujasid/blender-mcp/commits/main" \
+        | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
+    fi && \
+    echo "blender-mcp addon ref: $REF" && \
+    curl -fsSL "https://raw.githubusercontent.com/ahujasid/blender-mcp/${REF}/addon.py" \
+      -o "$ADDONS_DIR/blender_mcp.py"
+
+# ── 5. Blender startup script ────────────────────────────────────────────────
+# This script is run by Blender via --python on launch. It enables the addon
+# and starts the socket server. It also saves a baseline scene.blend so
+# syncDown always finds a file. Copied into the image so it persists across
+# restarts.
+RUN mkdir -p /root/blender/renders
+
+COPY start_blender_mcp.py /root/start_blender_mcp.py
+
+# ── 6. Default env ───────────────────────────────────────────────────────────
+ENV BLENDER_PORT=9876 \
+    DISPLAY=:99 \
+    BLENDER_VERSION=${BLENDER_VERSION}

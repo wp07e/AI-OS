@@ -269,7 +269,11 @@ function CanvasArea({
     phase === "assets_resolved" ||
     phase === "capturing_template" ||
     phase === "template_captured" ||
-    phase === "awaiting_candidate_selection";
+    phase === "awaiting_candidate_selection" ||
+    // Blender phases (GPU provisioning + rendering + recovery)
+    phase === "provisioning" ||
+    phase === "rendering" ||
+    phase === "recovering";
   useEffect(() => {
     onGenerationBusyChange(
       isGenBusy

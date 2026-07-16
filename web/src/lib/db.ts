@@ -4,14 +4,19 @@ import { dirname, resolve } from "node:path";
 import { hashSync } from "bcryptjs";
 import { defaultAvatarUrl } from "./avatar";
 
-export const DB_PATH = resolve(process.cwd(), "data", "aios.db");
+// Allow an explicit override (used by tests); default to <cwd>/data/aios.db.
+export const DB_PATH = resolve(process.env.DB_PATH ?? process.cwd() + "/data/aios.db");
 
 let _db: Database.Database | null = null;
 
 /** Singleton DB handle. Migrations are idempotent and run on first open. */
 export function db(): Database.Database {
   if (_db) return _db;
+  return openDb();
+}
 
+/** Opens a fresh DB connection at DB_PATH, runs migrations, caches it. */
+function openDb(): Database.Database {
   mkdirSync(dirname(DB_PATH), { recursive: true });
 
   const conn = new Database(DB_PATH);
@@ -22,9 +27,27 @@ export function db(): Database.Database {
   migrateLegacyOpencodeSessions(conn);
   migrateOpencodeSessionsContainerId(conn);
   migrateAdminColumn(conn);
+  migrateGpuLeasesLastError(conn);
   seedDefaultUser(conn);
   _db = conn;
   return conn;
+}
+
+/**
+ * TEST-ONLY: closes the cached DB connection and resets the singleton so the
+ * next `db()` call opens a fresh connection. This lets test files point at a
+ * temp DB by setting process.env.DB_PATH before calling this. NEVER call this
+ * in production code.
+ */
+export function _resetDbForTests(): void {
+  if (_db) {
+    try {
+      _db.close();
+    } catch {
+      // already closed
+    }
+    _db = null;
+  }
 }
 
 function migrate(conn: Database.Database) {
@@ -103,7 +126,45 @@ function migrate(conn: Database.Database) {
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY(workflow_instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
     );
+
+    -- One row per Blender workflow instance that holds (or is waiting for) a
+    -- vast.ai GPU lease. The host GPU Lease Manager (lib/gpu/lease-manager.ts)
+    -- is the sole writer. A row exists from auto-acquire (on lane open) until
+    -- release+destroy. state follows LeaseState (queued|provisioning|ready|
+    -- recovering|releasing). last_activity drives the idle-timeout auto-
+    -- release. vast_id is the rented instance id; ssh_host/port are the
+    -- instance's SSH endpoint the in-container tunnel dials.
+    CREATE TABLE IF NOT EXISTS gpu_leases (
+      instance_id   TEXT    PRIMARY KEY,
+      user_id       INTEGER NOT NULL,
+      state         TEXT    NOT NULL,
+      vast_id       INTEGER,          -- vast.ai instance id (null while queued)
+      gpu_name      TEXT,             -- e.g. "RTX 4060"
+      dph           REAL,             -- dollars per hour
+      ssh_host      TEXT,
+      ssh_port      INTEGER,
+      ssh_key_id    INTEGER,          -- vast.ai SSH key id (cleaned up on release)
+      queue_position INTEGER,         -- 0-based position when state=queued
+      queue_requested_at INTEGER,     -- ms epoch, for FIFO ordering
+      acquired_at   INTEGER,          -- ms epoch, when provisioning started
+      last_activity INTEGER NOT NULL, -- ms epoch, bumped on every poll/render
+      last_synced_at INTEGER,         -- ms epoch of the last successful .blend sync-down
+      last_error     TEXT,            -- last provisioning/recovery error (surfaced to UI)
+      FOREIGN KEY(instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
+    );
   `);
+}
+
+// Add last_error and ssh_key_id to pre-existing gpu_leases tables (idempotent).
+export function migrateGpuLeasesLastError(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(gpu_leases)").all() as Array<{ name: string }>;
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  if (!cols.some((c) => c.name === "last_error")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN last_error TEXT");
+  }
+  if (!cols.some((c) => c.name === "ssh_key_id")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN ssh_key_id INTEGER");
+  }
 }
 
 // Add container_id to pre-existing opencode_sessions tables (idempotent).

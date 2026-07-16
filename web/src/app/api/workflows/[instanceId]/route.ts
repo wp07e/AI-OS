@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { execInContainer, getContainerForUser } from "@/lib/docker";
+import { leaseManager } from "@/lib/gpu/lease-manager";
 
 export const runtime = "nodejs";
 
@@ -66,13 +67,24 @@ export async function DELETE(
 
   const instance = db()
     .prepare(
-      "SELECT id, user_id, folder FROM workflow_instances WHERE id = ? AND user_id = ?",
+      "SELECT id, user_id, workflow_type, folder FROM workflow_instances WHERE id = ? AND user_id = ?",
     )
     .get(instanceId, user.id) as
-    | { id: string; user_id: number; folder: string }
+    | { id: string; user_id: number; workflow_type: string; folder: string }
     | undefined;
   if (!instance) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
+  }
+
+  // Release any GPU lease BEFORE deleting the row. Without this, deleting a
+  // Blender lane orphans its vast.ai instance (the lease row is cascade-deleted
+  // but the remote GPU keeps billing until idle-timeout, and the lease manager
+  // has no way to know the workflow instance is gone).
+  if (instance.workflow_type === "blender") {
+    const existing = leaseManager().get(instanceId);
+    if (existing && existing.state !== "destroyed" && existing.state !== "releasing") {
+      await leaseManager().release(instanceId, "lane-deleted");
+    }
   }
 
   // Delete the workspace folder inside the container (best-effort).

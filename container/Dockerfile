@@ -42,6 +42,9 @@ RUN npm install -g opencode-ai@${OPENCODE_VERSION}
 FROM node:${NODE_VERSION}-slim AS runtime
 
 # Re-install the slim set of OS tools we need at runtime.
+# openssh-client: required for the Blender workflow's GPU SSH tunnel (the host
+#   lease manager execs `ssh -NfL 9876:...` inside this container to reach the
+#   blender-mcp socket on the remote GPU instance). See web/src/lib/gpu/.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
@@ -53,6 +56,7 @@ RUN apt-get update \
       socat \
       iproute2 \
       ffmpeg \
+      openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # uv — Python package runner used to launch the Grok MCP. The installer ships
@@ -142,6 +146,70 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd ${LAYERRE_MCP_DIR} \
  && uv sync --frozen --no-dev \
  && find ${LAYERRE_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
+
+# ─── Blender workflow GPU bootstrap ─────────────────────────────────────────
+# The Blender workflow rents an ephemeral GPU instance on vast.ai per workflow
+# session. Blender + the blender-mcp add-on run on the GPU instance; the
+# OpenCode agent drives them via the blender-mcp MCP server (declared in
+# opencode.jsonc) which dials 127.0.0.1:9876 — reached through an SSH tunnel
+# the host starts inside this container. See container/gpu/README.md.
+#
+# Two artifacts are baked here so the host lease manager can provision GPU
+# instances without network access at runtime:
+#   1. /app/gpu/addon.py   — the pinned blender-mcp Blender add-on, scp'd onto
+#                            each GPU instance by the onstart script.
+#   2. /app/gpu/onstart.sh — the vast.ai --onstart bootstrap script.
+#
+# Versioning: the blender-mcp GitHub repo has NO version tags, so addon.py is
+# fetched from the `main` branch HEAD at build time (auto-updates on each build,
+# matching how OPENCODE_VERSION=latest works below). To pin for reproducibility,
+# pass --build-arg BLENDER_MCP_REF=<commit-sha>. The PyPI package (the MCP
+# server the agent talks to) is resolved to the latest release by default; pin
+# with --build-arg BLENDER_MCP_VERSION=<x.y.z>. Keep the two roughly in sync.
+ARG BLENDER_MCP_REF=main
+ARG BLENDER_MCP_VERSION=latest
+# The Blender version the GPU onstart script downloads (NOT apt — apt only has
+# 3.0.1 on Ubuntu 22.04). Downloaded from blender.org at instance boot time.
+# Set to "latest-4.5" to auto-resolve, or pin to a specific version like "4.5.11".
+ARG BLENDER_VERSION=4.5.11
+ENV GPU_DIR=${APP_DIR}/gpu
+# Fetch the addon at the resolved ref. We expand `main` to a concrete SHA first
+# so the RUN layer is cache-keyed on a stable ref; a moving `main` would bust
+# the cache unpredictably. When BLENDER_MCP_REF is already a SHA, this is a
+# no-op passthrough.
+RUN mkdir -p ${GPU_DIR} \
+ && REF="${BLENDER_MCP_REF}" \
+ && if [ "$REF" = "main" ]; then \
+      REF=$(curl -fsSL "https://api.github.com/repos/ahujasid/blender-mcp/commits/main" \
+        | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
+    fi \
+ && echo "blender-mcp addon ref: $REF" \
+ && curl -fsSL "https://raw.githubusercontent.com/ahujasid/blender-mcp/${REF}/addon.py" \
+      -o ${GPU_DIR}/addon.py
+COPY gpu/onstart.sh ${GPU_DIR}/onstart.sh
+COPY gpu/onstart-baked.sh ${GPU_DIR}/onstart-baked.sh
+RUN chmod +x ${GPU_DIR}/onstart.sh ${GPU_DIR}/onstart-baked.sh
+# Pre-warm the blender-mcp MCP tool so the agent's first tool call isn't slow.
+# `uvx blender-mcp` resolves the package into the uv cache; the actual MCP
+# server process is started by opencode on demand via the opencode.jsonc entry.
+# BLENDER_MCP_VERSION=latest picks up the newest release automatically (matches
+# the mcp-remote@latest / opencode-ai@latest convention used elsewhere).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "${BLENDER_MCP_VERSION}" = "latest" ]; then \
+      uvx blender-mcp --help >/dev/null 2>&1 || true; \
+    else \
+      uvx --from "blender-mcp==${BLENDER_MCP_VERSION}" blender-mcp --help >/dev/null 2>&1 || true; \
+    fi
+# Deterministic Blender helper pipeline (lease bootstrap, artifact sync, headless
+# batch render). The agent's interactive scene work goes through the blender MCP
+# tools directly; this script owns only the non-agent-safe ops. run.py is
+# invoked as:
+#   uv run --project /app/blender python /app/blender/run.py <folder> --request request.json
+ENV BLENDER_PIPELINE_DIR=${APP_DIR}/blender
+COPY blender/pyproject.toml ${BLENDER_PIPELINE_DIR}/
+COPY blender/*.py           ${BLENDER_PIPELINE_DIR}/
+RUN cd ${BLENDER_PIPELINE_DIR} \
+ && find . -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # ─── Python on PATH ────────────────────────────────────────────────────────
 # uv manages its own CPython under UV_PYTHON_INSTALL_DIR (/opt/uv/python).

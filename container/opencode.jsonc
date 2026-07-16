@@ -125,6 +125,26 @@
       "environment": {
         "LAYERRE_API_KEY": "{env:LAYERRE_API_KEY}"
       }
+    },
+    // Blender MCP (blender-mcp) — drives a remote Blender instance running on
+    // an ephemeral vast.ai GPU instance. The MCP server (this process) dials a
+    // FIXED 127.0.0.1:9876 target. That loopback port is actually an SSH tunnel
+    // (`ssh -NfL 9876:127.0.0.1:9876 root@gpu-ip`) that the host lease manager
+    // starts inside this container when a GPU lease is acquired, and kills on
+    // release. Because the dial target never changes, GPU leases come and go
+    // with NO dynamic MCP config and NO OpenCode restart — only the tunnel
+    // changes. When no lease is active the tunnel is absent and tool calls
+    // return a connection-refused error the SKILL.md tells the agent to
+    // interpret as "GPU not ready — provisioning is automatic."
+    "blender": {
+      "type": "local",
+      "command": ["uvx", "blender-mcp"],
+      "enabled": true,
+      "environment": {
+        "BLENDER_HOST": "127.0.0.1",
+        "BLENDER_PORT": "9876"
+      },
+      "timeout": 120000
     }
   }
 }

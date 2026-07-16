@@ -78,6 +78,27 @@ export async function GET(
   if (typeof state.lastUpdated !== "string") state.lastUpdated = new Date().toISOString();
   if (!Array.isArray(state.errors)) state.errors = [];
 
+  // Stale-phase detection: if the workflow is in a "busy" phase (starting,
+  // rendering, recovering) but the lastUpdate timestamp is older than a
+  // threshold, the process that wrote it is likely dead (GPU destroyed,
+  // run.py killed, container restarted). Surface it as "stale" so the canvas
+  // stops showing an infinite spinner. This is a safety net — the happy path
+  // transitions through these phases in seconds; only a dead process leaves
+  // them stale.
+  const BUSY_PHASES = new Set(["starting", "rendering", "recovering", "provisioning"]);
+  const STALE_THRESHOLD_MS = 3 * 60 * 1000; // 3 minutes
+  if (BUSY_PHASES.has(state.phase)) {
+    const ageMs = Date.now() - new Date(state.lastUpdated).getTime();
+    if (Number.isFinite(ageMs) && ageMs > STALE_THRESHOLD_MS) {
+      const originalPhase = state.phase;
+      state.phase = "stale";
+      state.errors = [
+        `State "${originalPhase}" hasn't updated in ${Math.round(ageMs / 1000)}s — the GPU may have been lost.`,
+        ...state.errors,
+      ];
+    }
+  }
+
   // Files present in the workspace folder — lets the canvas discover assets
   // (exports/, brief.json, memory.md, etc.) without separate calls.
   const entries = await listWorkspaceDir(row, folder);

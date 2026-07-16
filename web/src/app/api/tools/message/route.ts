@@ -132,7 +132,13 @@ export async function POST(req: Request) {
     const { buildLaneBrandPrefill } = await import("@/lib/brand/lane-prefill");
     const brandPrefill = await buildLaneBrandPrefill(row, instance.folder);
     const automationPrefill = await buildAutomationPrefill(row, instance.folder);
-    const prefills = [automationPrefill, brandPrefill].filter(Boolean).join("\n\n");
+    // Blender lease prefill: tells the agent the current GPU lease state so it
+    // knows whether blender tools are reachable. Empty for non-Blender lanes.
+    const { buildBlenderLeasePrefill, isBlenderInstance } = await import("@/lib/gpu/blender-prefill");
+    const blenderPrefill = isBlenderInstance(workflowInstanceId)
+      ? buildBlenderLeasePrefill(workflowInstanceId)
+      : "";
+    const prefills = [automationPrefill, blenderPrefill, brandPrefill].filter(Boolean).join("\n\n");
     if (prefills) deliveredMessage = `${prefills}\n\n${message}`;
 
     // Build the one-time session prime. Sent ONLY when a new session is created

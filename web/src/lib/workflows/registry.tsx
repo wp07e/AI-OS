@@ -4,6 +4,9 @@ import type { CarouselState } from "@/app/app/(workflow)/carousel/types";
 import { VideoStudio } from "@/app/app/(workflow)/video/VideoStudio";
 import { useVideoState } from "@/app/app/(workflow)/video/useVideoState";
 import type { VideoState } from "@/app/app/(workflow)/video/types";
+import { BlenderStudio } from "@/app/app/(workflow)/blender/BlenderStudio";
+import { useBlenderState } from "@/app/app/(workflow)/blender/useBlenderState";
+import type { BlenderState } from "@/app/app/(workflow)/blender/types";
 import type { WorkflowDefinition } from "./types";
 
 /**
@@ -61,6 +64,28 @@ export function VideoIcon({ className }: { className?: string }) {
   );
 }
 
+export function BlenderIcon({ className }: { className?: string }) {
+  // A cube — represents 3D scene work.
+  return (
+    <svg
+      className={className}
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" />
+      <path d="M3 7l9 5 9-5" />
+      <path d="M12 22V12" />
+    </svg>
+  );
+}
+
 // ── Registry ───────────────────────────────────────────────────────────────
 //
 // Each entry is a WorkflowDefinition<S> with its own state generic. The map is
@@ -110,10 +135,35 @@ const videoDefinition: WorkflowDefinition<VideoState> = {
   ].join(" "),
 };
 
+const blenderDefinition: WorkflowDefinition<BlenderState> = {
+  type: "blender",
+  label: "Blender Studio",
+  icon: BlenderIcon,
+  description: "Create 3D scenes and renders on an on-demand GPU instance.",
+  folder: "blends",
+  skill: "blender",
+  Canvas: BlenderStudio,
+  useState: useBlenderState,
+  sessionPrompt: [
+    "You are working in the Blender Studio workflow.",
+    "GPU acquisition, release, and recovery are AUTOMATIC and owned by the host — do NOT call vast/ssh/destroy anything.",
+    "For scene work (creating objects, materials, loading assets), use the `blender` MCP tools directly.",
+    "For final batch renders, the render route runs op:render via the helper script — you do NOT call render yourself unless asked.",
+    "The lease prefill tells you the current GPU state. If it is not 'ready', do NOT call blender tools yet — tell the user provisioning is underway.",
+    "After any meaningful change: save via execute_code (bpy.ops.wm.save_as_mainfile(filepath=\"/root/blender/scene.blend\")), then do a quick EEVEE preview render (16 samples, 960x540) to /root/blender/renders/preview.png and update state.json renders[] with {id:\"preview\", path:\"exports/preview.png\", ...} so the user sees visual feedback immediately.",
+    "Brand assets are at /root/assets/<filename> on the GPU instance (pushed during provisioning). Load with bpy.data.images.load('/root/assets/<filename>'). List them with execute_code: import os; print(os.listdir('/root/assets')). Never reference /workspace/brand/assets/ from Blender — that's on the host.",
+    "Before acting, read memory.md and state.json in the instance folder if they exist, to pick up where a previous session left off.",
+    "Keep state.json enriched with: scene {objectCount, engine, savedAt}, renders[] (id, label, path, thumbPath, engine, samples, createdAt).",
+    "When you pause or finish, append a short handoff note to memory.md.",
+    "All paths are relative to the instance folder unless absolute.",
+  ].join(" "),
+};
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const WORKFLOW_REGISTRY: Record<string, WorkflowDefinition<any>> = {
   carousel: carouselDefinition,
   video: videoDefinition,
+  blender: blenderDefinition,
 };
 
 export type WorkflowType = keyof typeof WORKFLOW_REGISTRY;
