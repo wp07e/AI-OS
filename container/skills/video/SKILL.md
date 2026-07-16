@@ -272,7 +272,7 @@ Follow this process:
 
 2. **Then break the story into per-clip prompts.** Each clip's prompt describes one shot/segment of that continuous story. A viewer watching the clips back-to-back should see a coherent narrative unfold.
 
-3. **For clips with `continuity: "last_frame"`:** The prompt MUST describe what happens NEXT — continuing directly from where the prior clip ended. The prior clip's last frame becomes the visual starting point (the script handles this automatically), so your prompt should describe the NEXT action, not restart the scene. You MUST also set `sourceClipIndex` to the prior clip's index.
+3. **For clips with `continuity: "last_frame"`:** The prompt MUST describe what happens NEXT — continuing directly from where the prior clip ended. The prior clip's last frame becomes the visual starting point (the script handles this automatically), so your prompt should describe the NEXT action, not restart the scene. You MUST also set `sourceClipIndex` to the prior clip's index. The prompt MUST begin with the prefix `Continuing from @image1 (<brief description of the prior clip's ending>), ...` — `@image1` is the auto-injected last frame of the prior clip, and the script validates that every `last_frame` prompt references it (see the connected-story example below).
 
 4. **For clips with `continuity: "none"`:** The prompt starts a fresh scene. This is a hard cut — the visual and narrative can shift entirely.
 

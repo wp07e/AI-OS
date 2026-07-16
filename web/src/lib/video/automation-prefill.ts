@@ -39,6 +39,20 @@ export async function buildAutomationPrefill(
     `Analyze the assigned assets using grok.chat_with_vision, write storyboard.json,`,
     `then run the script with op: "automate". Do NOT call generation tools.]`,
     ``,
+    `GROK TOOL ACCESS — MANDATORY CHECK (HARD BOUNDARY):`,
+    `- You MUST be able to call grok.chat_with_vision to analyze the assigned assets.`,
+    `  Before doing anything else, confirm the tool is present in your available tools`,
+    `  and actually responds — call it once on a trivial/empty image input (or list`,
+    `  your tools) to verify it is reachable.`,
+    `- If the tool is MISSING or ERRORS: do NOT proceed with a generic story.`,
+    `  Briefly diagnose (the MCP server may still be initializing). Retry the tool`,
+    `  call a couple of times with a short pause. If it remains unavailable, STOP:`,
+    `  write phase: "error" to state.json with a message that Grok vision is`,
+    `  unreachable, append the same to memory.md, and tell the user that Grok access`,
+    `  must be restored before automation can run. This is a hard boundary — NEVER`,
+    `  substitute a generic/imagined story for an asset-driven one, even partially.`,
+    `- If the tool works: proceed to analyze each assigned asset and build the storyboard.`,
+    ``,
     `Configuration:`,
     `- ${req.clipCount} clips, ${req.clipDuration} seconds each, ${req.resolution} ${req.quality} quality, ${req.aspectRatio}`,
   ];
@@ -87,10 +101,16 @@ export async function buildAutomationPrefill(
   lines.push(``);
   lines.push(`CRITICAL STORY RULES:`);
   lines.push(`- Write ONE connected story across all clips — NOT independent scenes. The clips must flow as a single continuous narrative.`);
-  lines.push(`- For clips with "continue from last frame": the prompt MUST describe what happens NEXT, continuing directly from the prior clip's ending. The prior clip's last frame becomes the visual starting point.`);
   lines.push(`- Set sourceClipIndex to the prior clip's index for EVERY "continue from last frame" clip (clip 1 → sourceClipIndex: 0, clip 2 → sourceClipIndex: 1, etc.).`);
-  lines.push(`- Example: Clip 0 "dog enters shop" → Clip 1 (last_frame) "dog sits at counter, barista greets it" → Clip 2 (last_frame) "dog sips coffee, eyes wide with joy". Each clip continues from the last.`);
   lines.push(`- Be creative and vivid. If the base story is "funny," write prompts that are actually funny.`);
+  lines.push(``);
+  lines.push(`LAST-FRAME CONTINUITY — MANDATORY PREFIX RULE (the script validates this):`);
+  lines.push(`- For EVERY clip with "continue from last frame" (continuity: "last_frame"), the prompt MUST begin with the exact prefix: "Continuing from @image1 (<brief description of the prior clip's ending>), ..."`);
+  lines.push(`- @image1 is the prior clip's last frame, which the script auto-injects as the FIRST reference image. Referencing @image1 in the prompt is how the model knows to continue from that frame.`);
+  lines.push(`- CORRECT: "Continuing from @image1 (the golden retriever at the counter), the dog tilts its head at the menu..."`);
+  lines.push(`- INCORRECT: "A dog tilts its head at a menu in a coffee shop..." (starts from scratch, never references @image1 — the model ignores the last frame and continuity is broken).`);
+  lines.push(`- PRE-WRITE SELF-CHECK: before finalizing each last_frame clip's prompt, re-read it and confirm BOTH: (a) it begins with "Continuing from @image1", AND (b) it describes what happens NEXT from the prior clip's ending, not a restart of the scene.`);
+  lines.push(`- The script checks this and records a warning (visible in memory.md / state.json) for any last_frame clip whose prompt omits @image1. Fix the storyboard and re-run if you see such a warning.`);
   lines.push(``);
   lines.push(`CRITICAL ASSET RULES:`);
   lines.push(`- For each clip, you MUST include the user's selected brand/uploaded assets in the storyboard clip's "references" field. If you omit them, they will NOT appear in the video.`);

@@ -43,15 +43,20 @@ export async function isOpencodeReady(port: number, timeoutMs = 2000): Promise<b
 }
 
 /**
- * True when the opencode server reports the Canva MCP as connected.
+ * Reads the live status of an MCP server from opencode's `/mcp` endpoint.
  *
- * The `/mcp` endpoint returns an object keyed by MCP server name, each with a
- * `status` field ("connected" | "needs_auth" | ...). This is the single source
- * of truth for "can the agent reach Canva right now?" — there is no DB flag;
- * status is always derived live from the container. Used to gate Canva-dependent
- * workflows (e.g. Carousel Studio) and by the post-OAuth restart poll.
+ * The endpoint returns an object keyed by MCP server name (as registered in
+ * opencode.jsonc), each with a `status` field ("connected" | "needs_auth" | ...).
+ * This is the single source of truth for "can the agent reach this server right
+ * now?" — there is no DB flag; status is always derived live from the container.
+ *
+ * Shared by isCanvaConnected and isGrokConnected.
  */
-export async function isCanvaConnected(port: number, timeoutMs = 2000): Promise<boolean> {
+async function isMcpConnected(
+  port: number,
+  server: string,
+  timeoutMs = 2000,
+): Promise<boolean> {
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -64,10 +69,32 @@ export async function isCanvaConnected(port: number, timeoutMs = 2000): Promise<
     const data = (await res.json().catch(() => null)) as
       | Record<string, { status?: string }>
       | null;
-    return data?.Canva?.status === "connected";
+    return data?.[server]?.status === "connected";
   } catch {
     return false;
   }
+}
+
+/**
+ * True when the opencode server reports the Canva MCP as connected.
+ * Used to gate Canva-dependent workflows (e.g. Carousel Studio) and by the
+ * post-OAuth restart poll.
+ */
+export async function isCanvaConnected(port: number, timeoutMs = 2000): Promise<boolean> {
+  return isMcpConnected(port, "Canva", timeoutMs);
+}
+
+/**
+ * True when the opencode server reports the Grok MCP as connected.
+ *
+ * The Grok server is registered under the key "grok" in opencode.jsonc. The
+ * agent needs `grok.chat_with_vision` to analyze assigned assets during video
+ * automation — without it, the agent cannot read input images and would fall
+ * back to a generic story. Used by the video automation route as a preflight
+ * gate before launching a run.
+ */
+export async function isGrokConnected(port: number, timeoutMs = 2000): Promise<boolean> {
+  return isMcpConnected(port, "grok", timeoutMs);
 }
 
 interface OpencodeSession {

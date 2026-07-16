@@ -64,6 +64,49 @@ def _read_storyboard(folder: str) -> dict:
         return json.load(f)
 
 
+def _validate_continuity(folder: str, clips_spec: list[dict]) -> None:
+    """Warn (non-fatal) when a last_frame clip's prompt omits @image1.
+
+    The script mechanically preserves visual continuity: it extracts the prior
+    clip's last frame via ffmpeg and injects it as the FIRST reference image
+    (@image1) for every last_frame clip. So the generated video stays continuous
+    regardless. But if the prompt text never references @image1, the model may
+    not anchor on that frame and the resulting shot can drift from the prior
+    clip. SKILL.md + the automation prefill require last_frame prompts to begin
+    with "Continuing from @image1 (...)". This pass surfaces violations to the
+    agent (via memory.md + state.json errors[]) so it can fix the storyboard and
+    re-run — it does NOT abort generation and does NOT rewrite the prompt.
+    """
+    for i, clip in enumerate(clips_spec):
+        if clip.get("continuity") != "last_frame":
+            continue
+        if i == 0:
+            continue  # first clip has no prior frame to continue from
+        prompt = (clip.get("prompt") or "").strip()
+        if "@image1" in prompt.lower():
+            continue  # references the auto-injected last frame — good
+        idx1 = i + 1
+        hint = (
+            f"⚠️ Clip {idx1}: continuity is 'last_frame' but the prompt does NOT "
+            f"reference @image1 (the auto-injected last frame of clip {i}). The "
+            f"prompt should begin with \"Continuing from @image1 (...), ...\". "
+            f"Rewriting storyboard.json to fix this is strongly recommended before "
+            f"re-running. (Visual continuity is still preserved mechanically — this "
+            f"is a prompt-wording warning.)"
+        )
+        S.append_memory(folder, hint)
+        state = S.read_state(folder)
+        errors = state.get("errors", [])
+        errors.append({
+            "severity": "warning",
+            "kind": "continuity",
+            "clipIndex": i,
+            "message": hint,
+        })
+        # write_state with errors= replaces the list; preserve current phase.
+        S.write_state(folder, state.get("phase", "automating"), errors=errors)
+
+
 def _resolve_brand_assets(folder: str, asset_ids: list[str]) -> list[str]:
     """Map selected reference ids → container paths, PRESERVING SELECTION ORDER.
 
@@ -640,6 +683,15 @@ def _do_automate(folder: str, req: dict, client: GrokClient) -> None:
                 S.append_memory(folder, f"ℹ️ Clip {i+1}: injected {len(added)} missing asset(s) from automation_request")
     except Exception:
         pass  # Non-fatal — proceed with storyboard as-is
+
+    # Validate last_frame continuity prompts reference @image1 (non-fatal).
+    # Surfaces prompt-wording violations to the agent via memory.md / state.json
+    # errors[] so it can fix the storyboard and re-run. Generation is NOT blocked.
+    if total > 0:
+        try:
+            _validate_continuity(folder, clips_spec)
+        except Exception:
+            pass  # Non-fatal — never let validation block a run
 
     if total == 0:
         S.write_state(folder, "complete", active=None, extra={"automation": {

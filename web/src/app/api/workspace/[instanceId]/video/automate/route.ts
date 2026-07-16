@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { execInContainer, getContainerForUser } from "@/lib/docker";
-import { promptAsync, getOrCreateSession, type SessionPrime } from "@/lib/opencode";
+import { promptAsync, getOrCreateSession, isGrokConnected, type SessionPrime } from "@/lib/opencode";
 import { getWorkflow } from "@/lib/workflows/registry";
 
 export const runtime = "nodejs";
@@ -84,6 +84,36 @@ export async function POST(
   const row = getContainerForUser(user.id);
   if (!row || row.status !== "ready") {
     return NextResponse.json({ error: "container not ready" }, { status: 409 });
+  }
+
+  // ── Preflight: Grok MCP must be reachable before launching ───────────────
+  // The agent needs grok.chat_with_vision to analyze the assigned assets. If
+  // the Grok MCP server isn't connected (e.g. still initializing after
+  // container start, or XAI_API_KEY missing), the tool is simply absent from
+  // the agent's tool list — and the agent would silently fall back to a
+  // generic story instead of an asset-driven one. We poll for up to ~15s to
+  // allow the MCP handshake to finish, then hard-block (503) so no doomed run
+  // is ever launched. The user can retry once Grok is up.
+  //
+  // This gate covers the FIRST trigger message, which (unlike subsequent
+  // messages) is not augmented by buildAutomationPrefill's agent-side check.
+  const GROK_POLL_INTERVAL_MS = 2000;
+  const GROK_POLL_BUDGET_MS = 15000;
+  const grokReadyAt = Date.now() + GROK_POLL_BUDGET_MS;
+  let grokReady = await isGrokConnected(row.opencode_port);
+  while (!grokReady && Date.now() < grokReadyAt) {
+    await new Promise((r) => setTimeout(r, GROK_POLL_INTERVAL_MS));
+    grokReady = await isGrokConnected(row.opencode_port);
+  }
+  if (!grokReady) {
+    return NextResponse.json(
+      {
+        error: "grok-mcp-not-ready",
+        detail:
+          "Grok MCP is not connected. The agent needs grok.chat_with_vision to analyze the assigned assets. Wait a moment for the server to finish initializing, then retry.",
+      },
+      { status: 503 },
+    );
   }
 
   // ── Write automation_request.json ───────────────────────────────────────
