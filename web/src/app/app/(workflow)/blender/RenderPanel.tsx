@@ -73,7 +73,7 @@ export function RenderPanel({
           className="w-full bg-white/[0.05] border border-white/10 rounded px-2 py-1.5 text-sm text-white/90"
         >
           <option value="CYCLES">Cycles (GPU, photorealistic)</option>
-          <option value="BLENDER_EEVEE">EEVEE (real-time, faster)</option>
+          <option value="BLENDER_EEVEE_NEXT">EEVEE (real-time, faster)</option>
         </select>
       </Field>
 

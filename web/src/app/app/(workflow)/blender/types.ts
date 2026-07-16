@@ -9,8 +9,9 @@ import type { WorkflowState } from "@/lib/workflows/types";
  * state.json — see useBlenderState.
  */
 
-/** The render engine. Cycles is the headless-safe default; EEVEE needs Xvfb. */
-export type BlenderEngine = "CYCLES" | "BLENDER_EEVEE";
+/** The render engine. Cycles is the headless-safe default; EEVEE needs Xvfb.
+ * Blender 4.2+ uses BLENDER_EEVEE_NEXT (the old BLENDER_EEVEE was removed). */
+export type BlenderEngine = "CYCLES" | "BLENDER_EEVEE_NEXT" | "BLENDER_EEVEE";
 
 /** GPU lease states (mirrors LeaseState from lib/gpu/types.ts). */
 export type LeaseState =

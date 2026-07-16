@@ -107,7 +107,7 @@ function parseScene(raw: unknown): BlenderState["scene"] {
   const s = raw as Record<string, unknown>;
   return {
     objectCount: typeof s.objectCount === "number" ? s.objectCount : undefined,
-    engine: s.engine === "CYCLES" || s.engine === "BLENDER_EEVEE" ? s.engine : undefined,
+    engine: s.engine === "CYCLES" || s.engine === "BLENDER_EEVEE" || s.engine === "BLENDER_EEVEE_NEXT" ? s.engine : undefined,
     savedAt: typeof s.savedAt === "string" ? s.savedAt : undefined,
   };
 }

@@ -53,7 +53,7 @@ export function buildBlenderLeasePrefill(instanceId: string): string {
       `You are connected to a remote Blender instance via the blender MCP tools. Use them directly for scene work (create_object, execute_code, get_render, Poly Haven assets, etc.).`,
     );
     lines.push(
-      `Workflow after every meaningful change: (1) save via execute_code bpy.ops.wm.save_as_mainfile(filepath="/root/blender/scene.blend"), (2) do a quick EEVEE preview render (16 samples, 960x540) to /root/blender/renders/preview.png via execute_code, (3) update state.json renders[] with {id:"preview", path:"exports/preview.png", thumbPath:"exports/preview.png", engine:"BLENDER_EEVEE", samples:16, createdAt:"<ISO>"} so the user sees visual feedback. The host syncs the preview from the GPU to the workspace within ~60s.`,
+      `Workflow after every meaningful change: (1) save via execute_code bpy.ops.wm.save_as_mainfile(filepath="/root/blender/scene.blend"), (2) do a quick EEVEE preview render (16 samples, 960x540) to /root/blender/renders/preview.png via execute_code, (3) update state.json renders[] with {id:"preview", path:"exports/preview.png", thumbPath:"exports/preview.png", engine:"BLENDER_EEVEE_NEXT", samples:16, createdAt:"<ISO>"} so the user sees visual feedback. The host syncs the preview from the GPU to the workspace within ~5s.`,
     );
     lines.push(
       `For final high-quality renders, the user clicks "Render" in the UI (runs op:"render" via the helper script). You do NOT trigger that yourself unless asked.`,

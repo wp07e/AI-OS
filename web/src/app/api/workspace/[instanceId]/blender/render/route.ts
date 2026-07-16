@@ -19,7 +19,7 @@ export const maxDuration = 300;
  * Prerequisite: the lease must be "ready" (the lane-open POST acquires it
  * automatically). Returns 409 if the GPU isn't ready yet.
  */
-const ALLOWED_ENGINES = new Set(["CYCLES", "BLENDER_EEVEE"]);
+const ALLOWED_ENGINES = new Set(["CYCLES", "BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"]);
 const ALLOWED_RESOLUTIONS = new Set(["720p", "1080p", "1440p", "4k"]);
 const ALLOWED_SAMPLES = new Set([64, 128, 256, 512, 1024]);
 

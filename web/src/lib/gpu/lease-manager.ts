@@ -520,7 +520,7 @@ __STATE_EOF__`;
     sshPort: number,
     remotePath: string,
   ): Promise<number | null> {
-    const sshOpts = `-i ${SSH_KEY_PATH} -p ${sshPort} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5`;
+    const sshOpts = `ssh -i ${SSH_KEY_PATH} -p ${sshPort} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5`;
     const r = await exec(
       container,
       ["bash", "-lc", `${sshOpts} root@${sshHost} 'stat -c %s "${remotePath}" 2>/dev/null' 2>/dev/null`],
@@ -563,7 +563,7 @@ __STATE_EOF__`;
 
       // Renders: list remote files + sizes, then only transfer new/changed ones.
       // This avoids re-transferring unchanged PNGs every 60s.
-      const sshOpts = `-i ${SSH_KEY_PATH} -p ${lease.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5`;
+      const sshOpts = `ssh -i ${SSH_KEY_PATH} -p ${lease.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5`;
       const listRes = await exec(
         container,
         ["bash", "-lc", `${sshOpts} root@${lease.ssh_host} 'ls -la /root/blender/renders/ 2>/dev/null' 2>/dev/null`],

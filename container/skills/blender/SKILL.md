@@ -66,7 +66,7 @@ tight loop.
    ```python
    import bpy, os
    scene = bpy.context.scene
-   scene.render.engine = 'BLENDER_EEVEE'
+   scene.render.engine = 'BLENDER_EEVEE_NEXT'
    scene.eeveee.taa_render_samples = 16
    scene.render.resolution_x = 960
    scene.render.resolution_y = 540
@@ -80,7 +80,7 @@ tight loop.
    ~60s):
    ```json
    {"id": "preview", "label": "Preview", "path": "exports/preview.png",
-    "thumbPath": "exports/preview.png", "engine": "BLENDER_EEVEE", "samples": 16,
+    "thumbPath": "exports/preview.png", "engine": "BLENDER_EEVEE_NEXT", "samples": 16,
     "createdAt": "<ISO>"}
    ```
    This preview overwrites the previous one each time — it is NOT a final
