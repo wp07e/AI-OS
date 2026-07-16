@@ -60,9 +60,23 @@ export function AgentPanel({
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || chat.busy || !chatActive || genBusy.busy) return;
+    if (!text || !chatActive || genBusy.busy) return;
     setInput("");
+    // Steer: if the agent is mid-response, interrupt the current turn then send
+    // the new message as a fresh turn in the same session (opencode's modern
+    // steer model — no "steering reminder" metadata, which broke prompt caching).
+    if (chat.busy) {
+      chat.stop();
+      // Brief tick so stop()'s cleanup (busy:false) lands before send(), else
+      // send()'s busyRef guard would reject the steered message.
+      await Promise.resolve();
+    }
     await chat.send(text);
+  }
+
+  function onStop(e: React.MouseEvent) {
+    e.preventDefault();
+    chat.stop();
   }
 
   const headerLabel = brandOpen
@@ -77,9 +91,11 @@ export function AgentPanel({
     : workflowType ? (WORKFLOW_EXAMPLES[workflowType] ?? []) : [];
   const placeholder = genBusy.busy
     ? genBusy.reason ?? "Generation in progress…"
-    : brandOpen
-      ? brandInputPlaceholder(activeBrandCard)
-      : "Message the agent…";
+    : chat.busy
+      ? "Steer the agent — type and press Enter…"
+      : brandOpen
+        ? brandInputPlaceholder(activeBrandCard)
+        : "Message the agent…";
 
   return (
     <aside className="flex min-h-0 flex-col bg-[var(--card)]/20">
@@ -188,15 +204,26 @@ export function AgentPanel({
           onChange={(e) => setInput(e.target.value)}
           placeholder={chatActive ? placeholder : "Select a workflow or library to chat…"}
           className="flex-1 rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm outline-none transition focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={chat.busy || !chatActive || genBusy.busy}
+          disabled={!chatActive || genBusy.busy}
         />
-        <button
-          type="submit"
-          disabled={chat.busy || !input.trim() || !chatActive || genBusy.busy}
-          className="rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {chat.busy || genBusy.busy ? "…" : "↵"}
-        </button>
+        {chat.busy && !genBusy.busy ? (
+          <button
+            type="button"
+            onClick={onStop}
+            title="Stop the agent"
+            className="flex items-center justify-center rounded-xl border border-red-400/40 bg-red-500/20 px-4 py-2.5 text-sm font-semibold text-red-200 shadow-lg shadow-red-500/10 transition hover:bg-red-500/30"
+          >
+            <span className="inline-block h-3 w-3 rounded-[3px] bg-red-300" aria-hidden />
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={!input.trim() || !chatActive || genBusy.busy}
+            className="rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            ↵
+          </button>
+        )}
       </form>
     </aside>
   );

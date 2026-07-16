@@ -62,6 +62,9 @@ export interface AgentChat {
   streaming: StreamingState | null;
   /** Send a message to the active session. No-op if no session or busy. */
   send: (text: string) => Promise<void>;
+  /** Interrupt the active turn: aborts the stream + tells the server to abort
+   *  the agent. Keeps partial assistant output (like opencode). No-op if idle. */
+  stop: () => void;
   /** Clear ALL session history + error (nuclear; resets every chat context). */
   reset: () => void;
   /** Clear history + error for ONE session key only, leaving other contexts
@@ -104,6 +107,10 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
   const sessionRef = useRef(sessionKey);
   const transportRef = useRef(transport);
   const busyRef = useRef(false);
+  // AbortController for the in-flight fetch (so `stop()` can tear down the SSE).
+  const abortRef = useRef<AbortController | null>(null);
+  // The assistant message id currently streaming, so `stop()` can finalize it.
+  const activeAssistantRef = useRef<{ sKey: string; id: number } | null>(null);
   useEffect(() => {
     sessionRef.current = sessionKey;
   }, [sessionKey]);
@@ -207,6 +214,14 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
     setMessagesBySession((m) => ({ ...m, [sKey]: [...(m[sKey] ?? []), userMsg, assistantMsg] }));
     setStreamingBySession((m) => ({ ...m, [sKey]: { assistantId, reasoningText: "" } }));
 
+    // One AbortController per turn: lets `stop()` tear down the SSE fetch, which
+    // also propagates to the server relay via req.signal (route.ts aborts the
+    // /event subscription) AND triggers the separate /abort call to stop the
+    // server-side OpenCode agent (see `stop()`).
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    activeAssistantRef.current = { sKey, id: assistantId };
+
     try {
       const payload: Record<string, string> = { message: trimmed, [tport.key]: tport.value };
       if (tport.card) payload.card = tport.card;
@@ -214,6 +229,7 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: ctrl.signal,
       });
       if (!res.ok || !res.body) {
         const data = (await res.json().catch(() => ({}))) as ToolResponse;
@@ -222,15 +238,30 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
       }
       await consumeStream(res.body, sKey, assistantId);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setErrorBySession((m) => ({ ...m, [sKey]: msg }));
+      // Aborts (user clicked Stop / steered) are silent: keep whatever partial
+      // content streamed so far and mark the message finalized, like opencode.
+      const aborted = ctrl.signal.aborted || (err instanceof Error && err.name === "AbortError");
+      if (!aborted) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setErrorBySession((m) => ({ ...m, [sKey]: msg }));
+      }
       setMessagesBySession((m) => ({
         ...m,
         [sKey]: (m[sKey] ?? []).map((msg2) =>
-          msg2.id === assistantId ? { ...msg2, streaming: false, content: msg2.content || "(no response)" } : msg2,
+          msg2.id === assistantId
+            ? {
+                ...msg2,
+                streaming: false,
+                // On a real error with no content yet, mark "(no response)".
+                // On abort, preserve the partial content as-is.
+                content: aborted ? msg2.content : msg2.content || "(no response)",
+              }
+            : msg2,
         ),
       }));
     } finally {
+      abortRef.current = null;
+      activeAssistantRef.current = null;
       setStreamingBySession((m) => {
         if (!m[sKey]) return m;
         const next = { ...m };
@@ -241,6 +272,69 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
       setBusy(false);
     }
   }, [consumeStream]);
+
+  /**
+   * Interrupt the active turn. Three things, modeled on opencode's session.abort:
+   *   1. Abort the in-flight SSE fetch — tears down the client stream and, via
+   *      req.signal on the server, the /event subscription (no more deltas).
+   *   2. Fire the /abort route so the server-side OpenCode agent stops too
+   *      (otherwise the fire-and-forget promptAsync keeps burning tokens).
+   *   3. Finalize the in-flight assistant message (streaming:false, keep partial
+   *      content) and clear the streaming slot + busy flag.
+   *
+   * The fetch in `send` rejects with AbortError, whose catch path keeps partial
+   * output and skips surfacing an error. No-op if nothing is in flight.
+   */
+  const stop = useCallback(() => {
+    if (!busyRef.current) return;
+    const tport = transportRef.current;
+
+    // 1. Tear down the SSE fetch (also aborts the server relay's /event sub).
+    try {
+      abortRef.current?.abort();
+    } catch {
+      /* already aborted */
+    }
+
+    // 2. Tell the server to abort the OpenCode agent. Fire-and-forget — a
+    //    failed abort must never block the UI. The local unlock below happens
+    //    regardless of this call's outcome.
+    if (tport) {
+      const payload: Record<string, string> = { [tport.key]: tport.value };
+      if (tport.card) payload.card = tport.card;
+      fetch("/api/tools/message/abort", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch(() => {
+        /* best-effort */
+      });
+    }
+
+    // 3. Finalize the partial assistant message (keep content, drop streaming
+    //    flag) and clear the streaming + busy state. busyRef is flipped by the
+    //    `finally` in send(), but set it here too so stop() is self-sufficient
+    //    even if the abort rejection races.
+    const active = activeAssistantRef.current;
+    if (active) {
+      setMessagesBySession((m) => ({
+        ...m,
+        [active.sKey]: (m[active.sKey] ?? []).map((msg) =>
+          msg.id === active.id ? { ...msg, streaming: false } : msg,
+        ),
+      }));
+    }
+    setStreamingBySession((m) => {
+      const sKey = sessionRef.current;
+      if (!sKey || !m[sKey]) return m;
+      const next = { ...m };
+      delete next[sKey];
+      return next;
+    });
+    busyRef.current = false;
+    setBusy(false);
+  }, []);
 
   const reset = useCallback(() => {
     setMessagesBySession({});
@@ -269,5 +363,5 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
     });
   }, []);
 
-  return { messages, busy, error, streaming, send, reset, clearSession };
+  return { messages, busy, error, streaming, send, stop, reset, clearSession };
 }

@@ -306,6 +306,75 @@ export interface SessionPrime {
   sessionPrompt?: string;
 }
 
+/** Reads a cached session row, but only if the container is unchanged (same
+ *  port AND container_id). Returns null otherwise (no creation, no priming).
+ *  Shared by getOrCreate* (reuse-on-hit) and the abort route (resolve-only). */
+function lookupCachedSession(
+  row: { opencode_port: number; container_id: string | null },
+  table: "opencode_sessions" | "library_sessions",
+  where: [string, ...unknown[]],
+): string | null {
+  const cached = db()
+    .prepare(`SELECT * FROM ${table} WHERE ${where[0]}`)
+    .get(...where.slice(1)) as CachedSession | undefined;
+  if (!cached) return null;
+  if (cached.opencode_port !== row.opencode_port || cached.container_id !== row.container_id) return null;
+  return cached.session_id;
+}
+
+/** Read-only cached session id for a workflow lane, or null if absent/stale. */
+export function getCachedWorkflowSession(
+  userId: number,
+  workflowInstanceId: string,
+  row: { opencode_port: number; container_id: string | null },
+): string | null {
+  return lookupCachedSession(row, "opencode_sessions", [
+    "user_id = ? AND workflow_instance_id = ?",
+    userId,
+    workflowInstanceId,
+  ]);
+}
+
+/** Read-only cached session id for a library, or null if absent/stale. */
+export function getCachedLibrarySession(
+  userId: number,
+  libraryKey: string,
+  row: { opencode_port: number; container_id: string | null },
+): string | null {
+  return lookupCachedSession(row, "library_sessions", [
+    "user_id = ? AND library_key = ?",
+    userId,
+    libraryKey,
+  ]);
+}
+
+/**
+ * Best-effort abort of the active turn in a session. Fires OpenCode's
+ * `POST /session/:id/abort`, which cancels the running agent fiber and
+ * propagates an abort signal to the LLM stream + any in-flight tool calls.
+ *
+ * Tolerates any failure: a non-2xx may mean the turn is already idle, the
+ * session is stale, or this OpenCode version predates the abort endpoint. In all
+ * those cases the client has already unlocked its UI — we just log and move on.
+ * Never throws.
+ */
+export async function abortSession(port: number, sessionId: string): Promise<void> {
+  try {
+    const res = await fetch(opencodeUrl(port, `/session/${sessionId}/abort`), {
+      method: "POST",
+      headers: headers(),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      console.log(
+        `[opencode] POST /session/${sessionId}/abort → ${res.status} ${body.slice(0, 200) || "<no body>"} (non-fatal)`,
+      );
+    }
+  } catch (err) {
+    console.log(`[opencode] abort failed (non-fatal):`, err instanceof Error ? err.message : err);
+  }
+}
+
 /**
  * Returns a usable opencode session id for the given workflow instance, creating
  * + caching one if needed. Reuses the cached session only if the container
@@ -329,14 +398,12 @@ export async function getOrCreateSession(
   workflowInstanceId: string,
   prime?: SessionPrime,
 ): Promise<string> {
-  const cached = db()
-    .prepare("SELECT * FROM opencode_sessions WHERE user_id = ? AND workflow_instance_id = ?")
-    .get(row.user_id, workflowInstanceId) as CachedSession | undefined;
+  const cached = getCachedWorkflowSession(row.user_id, workflowInstanceId, row);
 
   // Reuse only if the container is unchanged. A recreated container has the
   // same port but a different container_id and a fresh (empty) session list.
-  if (cached && cached.opencode_port === row.opencode_port && cached.container_id === row.container_id) {
-    return cached.session_id;
+  if (cached) {
+    return cached;
   }
 
   const sessionId = await createSession(row.opencode_port);
@@ -422,12 +489,10 @@ export async function getOrCreateLibrarySession(
   libraryKey: string,
   prime?: SessionPrime,
 ): Promise<string> {
-  const cached = db()
-    .prepare("SELECT * FROM library_sessions WHERE user_id = ? AND library_key = ?")
-    .get(row.user_id, libraryKey) as CachedSession | undefined;
+  const cached = getCachedLibrarySession(row.user_id, libraryKey, row);
 
-  if (cached && cached.opencode_port === row.opencode_port && cached.container_id === row.container_id) {
-    return cached.session_id;
+  if (cached) {
+    return cached;
   }
 
   const sessionId = await createSession(row.opencode_port);
