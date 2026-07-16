@@ -95,7 +95,7 @@ export interface LeaseManagerConfig {
   maxConcurrent?: number;
   idleTimeoutMs?: number;
   watchdogIntervalMs?: number; // default 30s
-  syncIntervalMs?: number; // default 60s
+  syncIntervalMs?: number; // default 5s
   queuePumpIntervalMs?: number; // default 20s
   idleReaperIntervalMs?: number; // default max(idleTimeoutMs/4, 30s)
   gpuImage?: string;
@@ -223,7 +223,7 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
   const maxConcurrent = config.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const idleTimeoutMs = config.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const watchdogIntervalMs = config.watchdogIntervalMs ?? 30_000;
-  const syncIntervalMs = config.syncIntervalMs ?? 60_000;
+  const syncIntervalMs = config.syncIntervalMs ?? 5_000;
   const queuePumpIntervalMs = config.queuePumpIntervalMs ?? 20_000;
   const idleReaperIntervalMs = config.idleReaperIntervalMs ?? Math.max(idleTimeoutMs / 4, 30_000);
   const gpuImage = config.gpuImage ?? DEFAULT_GPU_IMAGE;
@@ -510,6 +510,35 @@ __STATE_EOF__`;
     await exec(container, ["bash", "-lc", cmd], { user: APP_USER }).catch(() => {});
   }
 
+  /**
+   * Get the byte size of a remote file on the GPU instance via SSH stat.
+   * Returns null if the file doesn't exist or the command fails.
+   */
+  async function remoteFileSize(
+    container: ContainerRow,
+    sshHost: string,
+    sshPort: number,
+    remotePath: string,
+  ): Promise<number | null> {
+    const sshOpts = `-i ${SSH_KEY_PATH} -p ${sshPort} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5`;
+    const r = await exec(
+      container,
+      ["bash", "-lc", `${sshOpts} root@${sshHost} 'stat -c %s "${remotePath}" 2>/dev/null' 2>/dev/null`],
+      { user: APP_USER },
+    ).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+    const size = parseInt(r.stdout.trim(), 10);
+    return Number.isFinite(size) && size >= 0 ? size : null;
+  }
+
+  /** Get the byte size of a local file in the container. Returns null if missing. */
+  async function localFileSize(container: ContainerRow, localPath: string): Promise<number | null> {
+    const r = await exec(container, ["bash", "-lc", `stat -c %s "${localPath}" 2>/dev/null || true`], {
+      user: APP_USER,
+    }).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+    const size = parseInt(r.stdout.trim(), 10);
+    return Number.isFinite(size) && size >= 0 ? size : null;
+  }
+
   /** Sync the .blend + renders from the instance down to the workspace. */
   async function syncDown(lease: LeaseRow, container: ContainerRow): Promise<void> {
     if (!lease.ssh_host || !lease.ssh_port) return;
@@ -517,27 +546,52 @@ __STATE_EOF__`;
     const folder = `/workspace/blends/${lease.instance_id}`;
     await exec(container, ["mkdir", "-p", `${folder}/exports`], { user: APP_USER }).catch(() => {});
     try {
-      const r1 = await exec(
-        container,
-        ["bash", "-lc", `scp ${scpOpts} 'root@${lease.ssh_host}:/root/blender/scene.blend' '${folder}/scene.blend'`],
-        { user: APP_USER },
-      );
-      // scene.blend may not exist yet on a fresh instance (before the agent
-      // saves or the onstart baseline-save runs). Treat as best-effort so the
-      // renders sync + last_synced_at still advance.
-      if (r1.code !== 0) {
-        console.warn(`[lease-manager] syncDown: scene.blend not found for ${lease.instance_id} (will retry next tick)`);
+      // scene.blend: compare sizes before transferring to avoid unnecessary
+      // egress charges (syncDown runs every 60s; .blend can be 500KB+).
+      const remoteBlendSize = await remoteFileSize(container, lease.ssh_host, lease.ssh_port, "/root/blender/scene.blend");
+      const localBlendSize = await localFileSize(container, `${folder}/scene.blend`);
+      if (remoteBlendSize !== null && remoteBlendSize !== localBlendSize) {
+        const r1 = await exec(
+          container,
+          ["bash", "-lc", `scp ${scpOpts} 'root@${lease.ssh_host}:/root/blender/scene.blend' '${folder}/scene.blend'`],
+          { user: APP_USER },
+        );
+        if (r1.code !== 0) {
+          console.warn(`[lease-manager] syncDown: scp scene.blend failed for ${lease.instance_id}`);
+        }
       }
-      // Copy the CONTENTS of renders/ into exports/ (not the dir itself).
-      // The agent's preview renders and run.py's batch renders both write to
-      // /root/blender/renders/<file>.png, and state.json references them as
-      // "exports/<file>.png". scp -r with a trailing /* copies the files, not
-      // the directory wrapper.
-      await exec(
+
+      // Renders: list remote files + sizes, then only transfer new/changed ones.
+      // This avoids re-transferring unchanged PNGs every 60s.
+      const sshOpts = `-i ${SSH_KEY_PATH} -p ${lease.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5`;
+      const listRes = await exec(
         container,
-        ["bash", "-lc", `scp ${scpOpts} -r 'root@${lease.ssh_host}:/root/blender/renders/*' '${folder}/exports/' 2>/dev/null || true`],
+        ["bash", "-lc", `${sshOpts} root@${lease.ssh_host} 'ls -la /root/blender/renders/ 2>/dev/null' 2>/dev/null`],
         { user: APP_USER },
-      ).catch(() => {}); // renders may not exist yet — best-effort
+      ).catch(() => ({ code: 0, stdout: "", stderr: "" }));
+
+      // Parse `ls -la` output: each line is "perms links owner group SIZE DATE NAME"
+      const remoteFiles: Array<{ name: string; size: number }> = [];
+      for (const line of listRes.stdout.split("\n")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length >= 9 && !parts[0].startsWith("d") && !parts[0].startsWith("total")) {
+          const size = parseInt(parts[4], 10);
+          const name = parts.slice(8).join(" ");
+          if (name && Number.isFinite(size)) remoteFiles.push({ name, size });
+        }
+      }
+
+      for (const { name, size: remoteSize } of remoteFiles) {
+        const localSize = await localFileSize(container, `${folder}/exports/${name}`);
+        if (remoteSize !== localSize) {
+          await exec(
+            container,
+            ["bash", "-lc", `scp ${scpOpts} 'root@${lease.ssh_host}:/root/blender/renders/${name}' '${folder}/exports/${name}'`],
+            { user: APP_USER },
+          ).catch(() => {}); // best-effort
+        }
+      }
+
       upsertLease({ ...lease, last_synced_at: now() });
     } catch (e) {
       // Sync failure is logged but non-fatal — the periodic sync will retry.
