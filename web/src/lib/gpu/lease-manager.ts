@@ -94,7 +94,7 @@ export interface LeaseManagerConfig {
   fileOps?: InstanceFileOps;
   maxConcurrent?: number;
   idleTimeoutMs?: number;
-  watchdogIntervalMs?: number; // default 30s
+  watchdogIntervalMs?: number; // default 10s
   syncIntervalMs?: number; // default 5s
   queuePumpIntervalMs?: number; // default 20s
   idleReaperIntervalMs?: number; // default max(idleTimeoutMs/4, 30s)
