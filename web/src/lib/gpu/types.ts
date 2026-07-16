@@ -45,7 +45,8 @@ export type InstanceState =
   | "requested"
   | "loading"
   | "running"
-  | "paused" // stopped — data preserved, storage billed
+  | "paused" // paused — data preserved, storage billed
+  | "stopped" // stopped — data preserved, not running (vast.ai uses both paused and stopped)
   | "exiting"
   | "error";
 

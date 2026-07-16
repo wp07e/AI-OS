@@ -747,53 +747,59 @@ __STATE_EOF__`;
       .prepare("SELECT * FROM containers WHERE user_id = ?")
       .get(lease.user_id) as ContainerRow | undefined;
 
-    // Case A: instance is paused/stopped (data preserved). Resume the SAME one.
-    if (inst && (inst.cur_state === "paused")) {
-      upsertLease({ ...current, state: "recovering" });
-      if (container) {
-        await writeWorkflowPhase(lease, container, "recovering", {
-          active: { op: "recover", label: "GPU paused — resuming…" },
-        });
+    // ── RUNNING: check tunnel health ──────────────────────────────────────
+    if (inst && inst.cur_state === "running") {
+      // Only check tunnel for leases that are ready (not still provisioning).
+      if (lease.ssh_host && lease.ssh_port && container && current.state === "ready") {
+        const probe = await exec(
+          container,
+          ["bash", "-lc", `nc -z 127.0.0.1 ${BLENDER_PORT} 2>/dev/null && echo ok || echo dead`],
+          { user: APP_USER },
+        ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
+        if (!probe.stdout.includes("ok")) {
+          await stopTunnel(container);
+          await startTunnel(container, { host: lease.ssh_host, port: lease.ssh_port });
+          console.log(`[watchdog] ${lease.instance_id}: re-established dead tunnel`);
+        }
       }
+      return;
+    }
+
+    // ── ANYTHING ELSE (paused, stopped, loading, exiting, error, gone):
+    //    Try to resume the instance first (preserves data). If that fails,
+    //    destroy and re-provision fresh with the saved .blend pushed back up.
+    //    vast.ai uses several state names (paused, stopped, etc.) that all mean
+    //    "not running but may be recoverable". Rather than enumerate them, we
+    //    treat any non-running state the same way: attempt resume, fall back
+    //    to re-provision.
+    console.log(`[watchdog] ${lease.instance_id}: instance ${lease.vast_id} in state ${inst?.cur_state ?? "gone"}, attempting recovery`);
+    upsertLease({ ...current, state: "recovering" });
+    if (container) {
+      await writeWorkflowPhase(lease, container, "recovering", {
+        active: { op: "recover", label: `GPU ${inst?.cur_state ?? "lost"} — reconnecting…` },
+      });
+    }
+    if (inst) {
+      // Instance still exists but isn't running. Try to start it.
       try {
         await vast.startInstance(lease.vast_id);
         await vast.waitForRunning(lease.vast_id);
         const target = await vast.sshUrl(lease.vast_id);
         if (target && container) {
           upsertLease({ ...current, ssh_host: target.host, ssh_port: target.port, state: "recovering" });
-          // The tunnel died with the stop; re-establish it.
           await stopTunnel(container);
           await waitForBlenderSocket(container, target);
           await startTunnel(container, target);
         }
         upsertLease({ ...getLease(lease.instance_id)!, state: "ready", last_activity: now(), last_error: null });
-        console.log(`[watchdog] ${lease.instance_id}: resumed paused instance ${lease.vast_id}`);
+        console.log(`[watchdog] ${lease.instance_id}: resumed instance ${lease.vast_id} from state ${inst.cur_state}`);
+        return;
       } catch (e) {
-        console.error(`[watchdog] ${lease.instance_id}: start failed, will re-provision:`, (e as Error).message);
-        await reProvision(current, container);
-      }
-      return;
-    }
-
-    // Case B: instance is gone/unrecoverable. Re-provision fresh with resume.
-    if (!inst || inst.cur_state === "exiting" || inst.cur_state === "error") {
-      await reProvision(current, container);
-      return;
-    }
-
-    // Case C: instance running but tunnel may be dead. Probe + re-establish.
-    if (inst.cur_state === "running" && lease.ssh_host && lease.ssh_port && container) {
-      const probe = await exec(
-        container,
-        ["bash", "-lc", `nc -z 127.0.0.1 ${BLENDER_PORT} 2>/dev/null && echo ok || echo dead`],
-        { user: APP_USER },
-      ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
-      if (!probe.stdout.includes("ok")) {
-        await stopTunnel(container);
-        await startTunnel(container, { host: lease.ssh_host, port: lease.ssh_port });
-        console.log(`[watchdog] ${lease.instance_id}: re-established dead tunnel`);
+        console.error(`[watchdog] ${lease.instance_id}: resume from ${inst.cur_state} failed, re-provisioning:`, (e as Error).message);
       }
     }
+    // Instance gone or resume failed — re-provision fresh.
+    await reProvision(current, container);
   }
 
   /** Destroy the dead instance and provision a fresh one, pushing the .blend up. */
