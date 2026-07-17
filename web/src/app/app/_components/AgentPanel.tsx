@@ -20,6 +20,9 @@ interface Props {
   /** For brand: true only after the user clicked "Ask AI" on a card. The panel
    *  stays inactive until then. Ignored for workflow lanes. */
   aiActivated: boolean;
+  /** True while the active lane is being deleted — disables the input so the
+   * user can't send into a doomed lane during the (slow) delete. */
+  laneDeleting?: boolean;
 }
 
 /**
@@ -38,6 +41,7 @@ export function AgentPanel({
   activeLibrary,
   activeBrandCard,
   aiActivated,
+  laneDeleting,
 }: Props) {
   const chat = useAgentChatContext();
   const genBusy = useGenerationBusy();
@@ -60,7 +64,7 @@ export function AgentPanel({
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = input.trim();
-    if (!text || !chatActive || genBusy.busy) return;
+    if (!text || !chatActive || genBusy.busy || laneDeleting) return;
     setInput("");
     // Steer: if the agent is mid-response, interrupt the current turn then send
     // the new message as a fresh turn in the same session (opencode's modern
@@ -89,13 +93,15 @@ export function AgentPanel({
   const examples = brandOpen && activeBrandCard
     ? BRAND_CARD_EXAMPLES[activeBrandCard]
     : workflowType ? (WORKFLOW_EXAMPLES[workflowType] ?? []) : [];
-  const placeholder = genBusy.busy
-    ? genBusy.reason ?? "Generation in progress…"
-    : chat.busy
-      ? "Steer the agent — type and press Enter…"
-      : brandOpen
-        ? brandInputPlaceholder(activeBrandCard)
-        : "Message the agent…";
+  const placeholder = laneDeleting
+    ? "This lane is being deleted…"
+    : genBusy.busy
+      ? genBusy.reason ?? "Generation in progress…"
+      : chat.busy
+        ? "Steer the agent — type and press Enter…"
+        : brandOpen
+          ? brandInputPlaceholder(activeBrandCard)
+          : "Message the agent…";
 
   return (
     <aside className="flex min-h-0 flex-col bg-[var(--card)]/20">
@@ -204,7 +210,7 @@ export function AgentPanel({
           onChange={(e) => setInput(e.target.value)}
           placeholder={chatActive ? placeholder : "Select a workflow or library to chat…"}
           className="flex-1 rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm outline-none transition focus:border-indigo-400/60 focus:ring-2 focus:ring-indigo-400/30 disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={!chatActive || genBusy.busy}
+          disabled={!chatActive || genBusy.busy || laneDeleting}
         />
         {chat.busy && !genBusy.busy ? (
           <button
@@ -218,7 +224,7 @@ export function AgentPanel({
         ) : (
           <button
             type="submit"
-            disabled={!input.trim() || !chatActive || genBusy.busy}
+            disabled={!input.trim() || !chatActive || genBusy.busy || laneDeleting}
             className="rounded-xl bg-indigo-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-50"
           >
             ↵

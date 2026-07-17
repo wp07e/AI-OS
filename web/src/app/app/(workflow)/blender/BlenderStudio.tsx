@@ -22,7 +22,7 @@ import type { BlenderState } from "./types";
  * web/src/lib/gpu/lease-manager.ts.
  */
 export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) {
-  const { lease, bootLogs, loaded, refreshLease } = useBlenderLease(instanceId);
+  const { lease, bootLogs, loaded, refreshLease, isReleasingPending, markReleasing } = useBlenderLease(instanceId);
   const chat = useAgentChatContext();
 
   // ── Auto-acquire on lane open (no user action) ───────────────────────────
@@ -62,6 +62,11 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
   const latestRender = renders[0] ?? null;
 
   const handleRelease = async () => {
+    // Set the pending-release flag synchronously BEFORE the fetch. This makes
+    // the "Releasing…" button survive a lane unmount/remount (navigation away
+    // and back) during the release window, covering the brief period before the
+    // server's `releasing` write is observable by the poller.
+    markReleasing();
     await fetch(`/api/workspace/${instanceId}/blender/lease`, { method: "DELETE" });
     refreshLease();
   };
@@ -79,7 +84,14 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
     <div className="flex h-full">
       {/* ── Main area: pill + viewport + gallery ─────────────────────────── */}
       <div className="flex-1 flex flex-col gap-3 p-4 overflow-hidden">
-        <LeasePill lease={lease} bootLogs={bootLogs} onRelease={handleRelease} onAcquire={handleAcquire} />
+        <LeasePill
+          lease={lease}
+          bootLogs={bootLogs}
+          loaded={loaded}
+          pendingRelease={isReleasingPending}
+          onRelease={handleRelease}
+          onAcquire={handleAcquire}
+        />
 
         {/* Viewport preview */}
         <div className="flex-1 flex items-center justify-center bg-black/40 rounded-lg border border-white/10 overflow-hidden min-h-0">

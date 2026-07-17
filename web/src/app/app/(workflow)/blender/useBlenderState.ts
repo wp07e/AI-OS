@@ -42,8 +42,50 @@ export function useBlenderLease(instanceId: string) {
   // Whether the first GET has resolved. The lane-open auto-acquire effect must
   // NOT fire until the lease state is actually loaded — otherwise a remount
   // (lane switch back, StrictMode, HMR) would see lease=null and fire acquire
-  // before we know the GPU was manually released.
+  // before we know whether the GPU was manually released.
   const [loaded, setLoaded] = useState(false);
+
+  // Pending manual release, backed by sessionStorage so it SURVIVES the lane
+  // unmount/remount that happens on every navigation away-and-back. Without
+  // this, after clicking "Release GPU" and navigating away, a remount poll could
+  // briefly read `ready` (before the server's releasing write lands, or during
+  // lock contention) and re-render the "Release GPU" button as if nothing had
+  // happened. The flag is set on click (markReleasing) and cleared once the
+  // poller observes a terminal state (destroyed/none).
+  const RELEASING_KEY = `blender:releasing:${instanceId}`;
+  const [isReleasingPending, setIsReleasingPending] = useState(false);
+
+  // Read the persisted flag on mount (and when instanceId changes).
+  useEffect(() => {
+    try {
+      setIsReleasingPending(sessionStorage.getItem(RELEASING_KEY) === "1");
+    } catch {
+      setIsReleasingPending(false);
+    }
+  }, [RELEASING_KEY]);
+
+  const markReleasing = useCallback(() => {
+    try {
+      sessionStorage.setItem(RELEASING_KEY, "1");
+    } catch {
+      // sessionStorage unavailable (private mode, etc.) — the in-memory flag
+      // still covers the current mount.
+    }
+    setIsReleasingPending(true);
+  }, [RELEASING_KEY]);
+
+  // Clear the flag once the server confirms a terminal state. The poller below
+  // updates `lease.state`, which this effect watches.
+  useEffect(() => {
+    if (lease && (lease.state === "destroyed" || lease.state === "none")) {
+      setIsReleasingPending(false);
+      try {
+        sessionStorage.removeItem(RELEASING_KEY);
+      } catch {
+        // ignore
+      }
+    }
+  }, [lease, RELEASING_KEY]);
 
   const refreshLease = useCallback(async () => {
     try {
@@ -96,7 +138,7 @@ export function useBlenderLease(instanceId: string) {
     };
   }, [instanceId]);
 
-  return { lease, bootLogs, loaded, refreshLease };
+  return { lease, bootLogs, loaded, refreshLease, isReleasingPending, markReleasing };
 }
 
 function parseActive(raw: unknown): BlenderState["active"] {

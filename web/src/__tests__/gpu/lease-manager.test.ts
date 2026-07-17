@@ -472,7 +472,7 @@ function seedLease(over: Partial<{
 }
 
 describe("lease manager: manual release state machine", () => {
-  it("release('manual') persists the row as destroyed + manually_released=1 (NOT deleted)", async () => {
+  it("release('manual') writes `releasing` synchronously, then `destroyed` after the background destroy", async () => {
     const vast = mockVast();
     const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
     await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
@@ -483,19 +483,55 @@ describe("lease manager: manual release state machine", () => {
     // The DELETE returns immediately — heavy work (sync/destroy) is backgrounded.
     expect(elapsed).toBeLessThan(500);
 
-    // Synchronous terminal state: the row is persisted so the UI can show
-    // "GPU Released" + Acquire, with ssh fields nulled (no live endpoint).
+    // SYNCHRONOUS transitional state (the whole point): the row is `releasing`
+    // + manually_released=1 so concurrent readers (UI poll, AI prefill) see
+    // "release in progress" the instant the lock is acquired. ssh/vast fields
+    // are RETAINED so the background sync can still reach the instance.
     const row = mgr.get("inst-1");
     expect(row).not.toBeNull();
-    expect(row!.state).toBe("destroyed");
+    expect(row!.state).toBe("releasing");
     expect(row!.manually_released).toBe(1);
-    expect(row!.ssh_host).toBeNull();
-    expect(row!.ssh_port).toBeNull();
+    expect(row!.ssh_host).toBe("1.2.3.4");
+    expect(row!.ssh_port).toBe(12345);
+    expect(row!.vast_id).toBe(500);
+
     // The instance is destroyed on the background promise; let it flush.
     await new Promise((r) => setTimeout(r, 50));
     expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
-    // After the background destroy, the row's vast_id is nulled too.
-    expect(mgr.get("inst-1")!.vast_id).toBeNull();
+
+    // After the background destroy completes, the row reaches the terminal
+    // `destroyed` state with all instance fields nulled.
+    const finalRow = mgr.get("inst-1");
+    expect(finalRow).not.toBeNull();
+    expect(finalRow!.state).toBe("destroyed");
+    expect(finalRow!.manually_released).toBe(1);
+    expect(finalRow!.ssh_host).toBeNull();
+    expect(finalRow!.ssh_port).toBeNull();
+    expect(finalRow!.vast_id).toBeNull();
+  });
+
+  it("does NOT clobber a re-acquired lease when the background destroy finishes (state=releasing guard)", async () => {
+    const vast = mockVast();
+    const exec = mockExec();
+    const mgr = createLeaseManager({ vast, exec, fileOps: mockFileOps() });
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+
+    // Kick off a manual release (enters `releasing`, starts background destroy).
+    mgr.release("inst-1", "manual");
+    // While the background destroy is still resolving, re-acquire: this resets
+    // the row out of `releasing` (to provisioning→ready) and provisions a new
+    // instance. The background closure must NOT then stomp that fresh lease.
+    const lease = await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+
+    // Let any background release work finish.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // The re-acquire won; the row is ready (not destroyed) and the flag cleared.
+    expect(lease.state).toBe("ready");
+    expect(lease.manually_released).toBe(0);
+    const after = mgr.get("inst-1");
+    expect(after?.state).toBe("ready");
+    expect(after?.manually_released).toBe(0);
   });
 
   it("release('idle-timeout') deletes the row (next view auto-acquires)", async () => {
@@ -635,9 +671,43 @@ describe("lease manager: reapReleases finalizes stranded rows", () => {
     // can't race the next test's seeded row (tests share the DB file).
     await new Promise((r) => setTimeout(r, 30));
 
-    // Stranded row reaped: instance destroyed, row deleted.
+    // Stranded row reaped: instance destroyed, row deleted (non-manual path).
     expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
     expect(mgr.get("inst-1")).toBeNull();
+  });
+
+  it("reaps a STRANDED MANUAL 'releasing' row to destroyed (not deleted) so the lane doesn't auto-reacquire", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+      destroyRetries: 1,
+    });
+    // A manual release was in progress (releasing + manually_released=1) when the
+    // process was killed, stranding the row past STALE_RELEASING_MS.
+    seedLease({
+      state: "releasing",
+      manually_released: 1,
+      vast_id: 500,
+      last_activity: Date.now() - 120_000,
+    });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 200));
+    mgr.stop();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Instance destroyed, and the row finalizes to `destroyed` (NOT deleted) so
+    // a lane remount does NOT silently auto-reacquire a GPU the user released.
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    const row = mgr.get("inst-1");
+    expect(row).not.toBeNull();
+    expect(row!.state).toBe("destroyed");
+    expect(row!.manually_released).toBe(1);
+    expect(row!.vast_id).toBeNull();
   });
 
   it("finalizes a 'destroyed' row whose vast_id wasn't nulled (unfinished destroy)", async () => {

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, type Dispatch, type SetStateAction } from "react";
 import { getWorkflow, WORKFLOW_TYPES } from "@/lib/workflows/registry";
 import { useCanvaStatus } from "./CanvaStatusProvider";
 import type { WorkflowInstance } from "./AppShell";
@@ -22,6 +22,11 @@ interface Props {
   /** Opens the per-lane automation wizard for an instance (video lanes only). */
   onOpenAutomationWizard: (inst: WorkflowInstance) => void;
   onRefresh: () => void;
+  /** Instance ids currently being deleted (tracked in AppShell so the active
+   * lane's chat can be disabled during deletion). WorkRail reads + mutates it
+   * via the setter rather than owning its own copy. */
+  deletingIds: Set<string>;
+  setDeletingIds: Dispatch<SetStateAction<Set<string>>>;
 }
 
 /**
@@ -35,7 +40,7 @@ interface Props {
  * their create + open buttons are disabled and an inline note points at the
  * "Connect Canva" affordance in the header (see CanvaStatusProvider).
  */
-export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loading, onSelect, onSelectLibrary, onOpenBrandWizard, onOpenAutomationWizard, onRefresh }: Props) {
+export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loading, onSelect, onSelectLibrary, onOpenBrandWizard, onOpenAutomationWizard, onRefresh, deletingIds, setDeletingIds }: Props) {
   const { connected, loading: canvaLoading } = useCanvaStatus();
   // Block only on a confirmed disconnect; while the probe is in flight the
   // buttons stay enabled so connected users never see a gate flicker.
@@ -44,7 +49,6 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
   const [openTypes, setOpenTypes] = useState<Set<string>>(new Set(["carousel"]));
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState("");
@@ -93,7 +97,14 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
       `Delete "${inst.title}"?\n\nThis removes the lane and all of its files. This cannot be undone.`,
     );
     if (!confirmed) return;
-    setDeletingId(inst.id);
+    // Track this lane as deleting (per-lane only — concurrent deletes of
+    // different lanes are allowed). AppShell reads this set to disable the
+    // active lane's chat input during deletion.
+    setDeletingIds((prev) => {
+      const next = new Set(prev);
+      next.add(inst.id);
+      return next;
+    });
     setDeleteError(null);
     try {
       const res = await fetch(`/api/workflows/${encodeURIComponent(inst.id)}`, {
@@ -108,7 +119,11 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
     } catch {
       setDeleteError("Network error deleting workflow.");
     } finally {
-      setDeletingId(null);
+      setDeletingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(inst.id);
+        return next;
+      });
     }
   }
 
@@ -282,19 +297,19 @@ export function WorkRail({ instances, activeId, activeLibrary, brandApplied, loa
                                 <button
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    if (deletingId !== null) return;
+                                    if (deletingIds.has(inst.id)) return;
                                     deleteWorkflow(inst);
                                   }}
-                                  disabled={deletingId !== null}
+                                  disabled={deletingIds.has(inst.id)}
                                   title={
-                                    deletingId === inst.id
+                                    deletingIds.has(inst.id)
                                       ? "Deleting…"
                                       : `Delete "${inst.title}"`
                                   }
                                   aria-label={`Delete ${inst.title}`}
                                   className="absolute right-1.5 top-1/2 grid h-6 w-6 -translate-y-1/2 place-items-center rounded text-[var(--muted)] opacity-100 transition hover:bg-red-500/15 hover:text-red-300 disabled:cursor-wait"
                                 >
-                                  {deletingId === inst.id ? (
+                                  {deletingIds.has(inst.id) ? (
                                     <SpinnerIcon />
                                   ) : (
                                     <TrashIcon />

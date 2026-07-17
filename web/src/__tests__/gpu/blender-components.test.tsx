@@ -20,8 +20,11 @@ import type { LeaseInfo } from "@/app/app/(workflow)/blender/types";
 // ── LeasePill ──────────────────────────────────────────────────────────────
 
 describe("LeasePill", () => {
+  // The production component always passes `loaded` (true once the first poll
+  // resolves). Tests simulate the post-load state, so pass loaded explicitly;
+  // the unloaded "Loading…" neutral pill is covered separately below.
   it("renders 'No GPU' when lease is null", () => {
-    render(<LeasePill lease={null} onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    render(<LeasePill lease={null} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
     expect(screen.getByText("No GPU")).toBeDefined();
     // Acquire button IS shown when there's no lease (manual re-acquire).
     expect(screen.getByText(/acquire/i)).toBeDefined();
@@ -31,7 +34,7 @@ describe("LeasePill", () => {
 
   it("renders provisioning state with a spinner indicator", () => {
     const lease: LeaseInfo = { instance_id: "x", state: "provisioning", gpu_name: "RTX 4060" };
-    render(<LeasePill lease={lease} onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
     expect(screen.getByText("Starting GPU")).toBeDefined();
     expect(screen.getByText("(RTX 4060)")).toBeDefined();
     // No release button during provisioning.
@@ -42,7 +45,7 @@ describe("LeasePill", () => {
 
   it("renders queued state with position", () => {
     const lease: LeaseInfo = { instance_id: "x", state: "queued", queue_position: 1 };
-    render(<LeasePill lease={lease} onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
     expect(screen.getByText("Waiting for GPU")).toBeDefined();
     expect(screen.getByText("#2 in queue")).toBeDefined(); // 0-based → display #2
   });
@@ -54,7 +57,7 @@ describe("LeasePill", () => {
       gpu_name: "RTX 4060",
       dph: 0.067,
     };
-    render(<LeasePill lease={lease} onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
     expect(screen.getByText("GPU Ready")).toBeDefined();
     expect(screen.getByText(/RTX 4060/)).toBeDefined();
     expect(screen.getByText(/\$0\.067\/hr/)).toBeDefined();
@@ -64,15 +67,44 @@ describe("LeasePill", () => {
   it("calls onRelease when Release GPU is clicked", () => {
     const onRelease = vi.fn(async () => {});
     const lease: LeaseInfo = { instance_id: "x", state: "ready", gpu_name: "RTX 4060", dph: 0.07 };
-    render(<LeasePill lease={lease} onRelease={onRelease} onAcquire={vi.fn()} />);
+    render(<LeasePill lease={lease} loaded onRelease={onRelease} onAcquire={vi.fn()} />);
     fireEvent.click(screen.getByText("Release GPU"));
     expect(onRelease).toHaveBeenCalledOnce();
   });
 
   it("renders recovering state without a release button being clickable label", () => {
     const lease: LeaseInfo = { instance_id: "x", state: "recovering" };
-    render(<LeasePill lease={lease} onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
     expect(screen.getByText("Reconnecting GPU")).toBeDefined();
+  });
+
+  it("renders a neutral 'Loading…' pill with no action buttons while not loaded", () => {
+    render(<LeasePill lease={null} onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    expect(screen.getByText("Loading…")).toBeDefined();
+    // Neither action button is shown during the pre-poll window (Test 4 fix).
+    expect(screen.queryByText(/acquire/i)).toBeNull();
+    expect(screen.queryByText(/release/i)).toBeNull();
+  });
+
+  it("overrides a stale 'ready' read with a disabled 'Releasing…' button while a release is pending (Test 3 fix)", () => {
+    // Simulates a remount poll reading `ready` during the pre-lock window after
+    // the user clicked Release. The sessionStorage-backed pendingRelease flag
+    // forces the disabled "Releasing…" button instead of "Release GPU".
+    const lease: LeaseInfo = { instance_id: "x", state: "ready", gpu_name: "RTX 4060" };
+    render(
+      <LeasePill
+        lease={lease}
+        loaded
+        pendingRelease
+        onRelease={vi.fn()}
+        onAcquire={vi.fn()}
+      />,
+    );
+    const releasingBtn = screen.getByText("Releasing…").closest("button");
+    expect(releasingBtn).toBeDefined();
+    expect((releasingBtn as HTMLButtonElement).disabled).toBe(true);
+    // The stale "Release GPU" button must NOT reappear.
+    expect(screen.queryByText("Release GPU")).toBeNull();
   });
 });
 

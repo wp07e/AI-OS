@@ -44,6 +44,10 @@ export function AppShell() {
   // Set by the active video canvas when a background generation script is
   // running, so the AgentPanel can disable chat to prevent interference.
   const [generationBusy, setGenerationBusy] = useState<GenerationBusyValue>({ busy: false });
+  // Instance ids currently being deleted. Owned here (not in WorkRail) so the
+  // active lane's chat input can be disabled while its deletion is in flight.
+  // Per-lane: concurrent deletes of different lanes are allowed.
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
   const refreshInstances = useCallback(async () => {
     try {
@@ -176,6 +180,8 @@ export function AppShell() {
           onOpenAutomationWizard={(inst) => setAutomationWizardInstance(inst)}
           onRefresh={refreshInstances}
           loading={loadingInstances}
+          deletingIds={deletingIds}
+          setDeletingIds={setDeletingIds}
         />
 
         <section className="flex min-w-0 flex-col overflow-hidden border-x border-white/10">
@@ -194,6 +200,7 @@ export function AppShell() {
           activeLibrary={activeLibrary}
           activeBrandCard={activeBrandCard}
           aiActivated={aiActivated}
+          laneDeleting={active ? deletingIds.has(active.id) : false}
         />
         </div>
 

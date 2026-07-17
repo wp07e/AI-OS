@@ -834,36 +834,42 @@ __STATE_EOF__`;
 
     if (reason === "manual") {
       // ── Manual release (the "Release GPU" button) ─────────────────────────
-      // The row reaches its kill-safe terminal state SYNCHRONOUSLY so the DELETE
-      // request returns immediately and the UI shows "GPU Released" + "Acquire
-      // GPU". ALL slow work — Blender save, artifact sync-down, tunnel stop,
-      // vast.ai destroy, ssh-key cleanup — runs on a tracked background promise.
-      // The DELETE route handler awaits release(), so anything awaited here
-      // blocks the request (and with real SSH latency the save+sync+stop can
-      // take minutes — that was the hang). Data safety is preserved: the
-      // background sync runs from a SNAPSHOT of the pre-release lease (ssh fields
-      // intact) so it can still reach the instance, and the 5s periodic syncTick
-      // bounds .blend staleness to ~5s if the process is killed before the
-      // background sync completes.
+      // State machine: ready → releasing → destroyed.
+      //
+      // The FIRST synchronous write flips the row to `releasing` (not directly
+      // to `destroyed`) so every concurrent reader — the UI's 5s GET poll, and
+      // the AI's per-message lease prefill — observes a durable "release in
+      // progress" signal the instant the per-instance lock is acquired. Without
+      // this, the row briefly still reads `ready` during the release and the AI
+      // can truthfully-but-misleadingly report "blender tools are reachable" /
+      // the UI can re-show "Release GPU" after a lane remount.
+      //
+      // `releasing` is held until the background destroy completes, then flipped
+      // to the terminal `destroyed` state. The DELETE route handler awaits
+      // release(), so only the synchronous prologue above runs before the
+      // request returns — the slow save/sync/stop/destroy (which can take
+      // minutes with real SSH latency) runs on a detached background promise.
+      // Data safety is preserved: the background sync runs from a SNAPSHOT of
+      // the pre-release lease (ssh fields intact) so it can still reach the
+      // instance, and the 5s periodic syncTick bounds .blend staleness to ~5s
+      // if the process is killed before the background sync completes.
+      //
+      // Residual window: between the user's click and the lock being acquired
+      // (a prior watchdog/recover tick may briefly hold it), the row is still
+      // in its pre-release state. This sub-second window is unavoidable without
+      // writing before the lock (which would race other per-instance ops); the
+      // client's sessionStorage pending-release flag covers it for the UI.
       const vastId = lease.vast_id;
       const sshKeyId = lease.ssh_key_id;
-      // Persist the kill-safe terminal state SYNCHRONOUSLY: destroyed + flag +
-      // ssh fields nulled. The UI sees "GPU Released" + Acquire immediately; any
-      // provisioning/watchdog sees no live SSH endpoint. vast_id stays set until
-      // the background destroy confirms, so the reaper can finalize it if the
-      // process dies mid-destroy.
-      upsertLease({
-        ...lease,
-        state: "destroyed",
-        manually_released: 1,
-        ssh_host: null,
-        ssh_port: null,
-      });
+      // Transitional state SYNCHRONOUSLY: releasing + flag. ssh/vast fields stay
+      // intact so the background sync can still reach the instance; they are
+      // nulled only when the row reaches `destroyed`.
+      upsertLease({ ...lease, state: "releasing", manually_released: 1 });
       setManuallyReleased(instanceId, 1);
-      // Background: save → sync → stop tunnel → destroy → delete ssh key → null
-      // instance fields. Tracked so a second release awaits it instead of racing;
-      // the watchdog reaper also finalizes destroyed rows whose vast_id is still
-      // set (process was killed mid-destroy).
+      // Background: save → sync → stop tunnel → destroy → delete ssh key →
+      // terminal `destroyed` + null instance fields. Tracked so a second release
+      // awaits it instead of racing; the watchdog reaper also finalizes stranded
+      // `releasing` rows whose process was killed mid-destroy.
       const snapshot = { ...lease };
       void (async () => {
         if (container) {
@@ -878,11 +884,22 @@ __STATE_EOF__`;
         if (sshKeyId) {
           await vast.deleteSshKey(sshKeyId).catch(() => {});
         }
-        // Null out the instance fields now that the instance is gone. Re-read in
-        // case a re-acquire reset them in the meantime.
+        // Flip to the terminal `destroyed` state and null the instance fields.
+        // Re-read in case a re-acquire reset the row in the meantime; only
+        // finalize if we still own it (state=releasing + manually_released=1).
+        // This guards against clobbering a freshly re-acquired lease — the same
+        // snapshot-stomping hazard syncDown guards against (see the comment
+        // there).
         const cur = getLease(instanceId);
-        if (cur && cur.manually_released === 1 && cur.state === "destroyed") {
-          upsertLease({ ...cur, vast_id: null, ssh_host: null, ssh_port: null, ssh_key_id: null });
+        if (cur && cur.manually_released === 1 && cur.state === "releasing") {
+          upsertLease({
+            ...cur,
+            state: "destroyed",
+            ssh_host: null,
+            ssh_port: null,
+            vast_id: null,
+            ssh_key_id: null,
+          });
         }
       })().catch((e) => console.error(`[lease-manager] background release failed for ${instanceId}:`, (e as Error).message));
       return;
@@ -965,10 +982,25 @@ __STATE_EOF__`;
         if (container) await saveSyncAndStopTunnel(cur, container).catch(() => {});
         if (cur.vast_id) await destroyInstanceWithRetry(cur.vast_id).catch(() => {});
         if (cur.ssh_key_id) await vast.deleteSshKey(cur.ssh_key_id).catch(() => {});
-        // No manually_released context here — a stranded non-manual release is
-        // best finalized by deleting the row (so the next view auto-acquires),
-        // matching the non-manual release path.
-        deleteLease(cur.instance_id);
+        // A stranded release is one whose releaseImpl was killed mid-destroy.
+        // For a MANUAL release (manually_released=1) the user explicitly stopped
+        // the GPU — finalize to the terminal `destroyed` state so the row
+        // PERSISTS and the lane does NOT auto-reacquire on remount. For a
+        // non-manual release (idle-timeout / lane-deleted) the row should be
+        // gone so the next view auto-acquires fresh — delete it, matching the
+        // non-manual release path.
+        if (cur.manually_released === 1) {
+          upsertLease({
+            ...cur,
+            state: "destroyed",
+            vast_id: null,
+            ssh_host: null,
+            ssh_port: null,
+            ssh_key_id: null,
+          });
+        } else {
+          deleteLease(cur.instance_id);
+        }
       }).catch((e) => console.error(`[watchdog] reap releasing ${lease.instance_id}:`, (e as Error).message));
     }
 
