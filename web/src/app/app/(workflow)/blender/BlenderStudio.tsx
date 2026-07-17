@@ -22,11 +22,22 @@ import type { BlenderState } from "./types";
  * web/src/lib/gpu/lease-manager.ts.
  */
 export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) {
-  const { lease, bootLogs, refreshLease } = useBlenderLease(instanceId);
+  const { lease, bootLogs, loaded, refreshLease } = useBlenderLease(instanceId);
   const chat = useAgentChatContext();
 
   // ── Auto-acquire on lane open (no user action) ───────────────────────────
   useEffect(() => {
+    // Wait until the lease state has actually been loaded. On a remount (lane
+    // switch back, StrictMode, HMR) `lease` is null on the first render; without
+    // this gate the effect would fire acquire before we know whether the GPU was
+    // manually released.
+    if (!loaded) return;
+    // Do NOT auto-acquire if the user explicitly released the GPU. After a
+    // "Release GPU" click the lease row persists as state="destroyed" +
+    // manually_released=1; the only way back is the explicit "Acquire GPU"
+    // button. Without this guard, returning to the lane would silently spin up
+    // a new GPU the user just released.
+    if (lease?.manually_released) return;
     if (lease?.state && lease.state !== "none" && lease.state !== "destroyed") return;
     // Fire the auto-acquire. resume:true so a saved .blend is pushed up.
     fetch(`/api/workspace/${instanceId}/blender/lease`, {
@@ -35,7 +46,7 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
       body: JSON.stringify({ resume: true }),
     }).then(() => refreshLease()).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instanceId]);
+  }, [instanceId, loaded]);
 
   // NOTE: the lease is NOT released on React unmount. Doing so caused premature
   // releases because unmount fires on every lane switch (and on StrictMode's
@@ -80,7 +91,7 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
               className="max-w-full max-h-full object-contain"
             />
           ) : (
-            <EmptyState leaseReady={leaseReady} busy={busy} phase={phase} />
+            <EmptyState leaseReady={leaseReady} manuallyReleased={!!lease?.manually_released} busy={busy} phase={phase} />
           )}
         </div>
 
@@ -117,10 +128,12 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
 
 function EmptyState({
   leaseReady,
+  manuallyReleased,
   busy,
   phase,
 }: {
   leaseReady: boolean;
+  manuallyReleased: boolean;
   busy: boolean;
   phase: string;
 }) {
@@ -143,6 +156,18 @@ function EmptyState({
     );
   }
   if (!leaseReady) {
+    if (manuallyReleased) {
+      // The user explicitly released the GPU — nothing will work until they
+      // click "Acquire GPU". Don't imply it's being acquired automatically.
+      return (
+        <div className="text-center text-white/40 max-w-xs">
+          <p className="text-sm mb-1">GPU has been released.</p>
+          <p className="text-xs text-white/30">
+            Rendering and scene editing are unavailable until you click <span className="text-emerald-400/80">Acquire GPU</span> above.
+          </p>
+        </div>
+      );
+    }
     return (
       <div className="text-center text-white/40 max-w-xs">
         <p className="text-sm mb-1">GPU is being acquired automatically.</p>

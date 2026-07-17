@@ -29,7 +29,8 @@ const STATE_DESCRIPTIONS: Record<LeaseState, string> = {
     "GPU lease is RECOVERING — the instance was stopped or the tunnel died and is being restored. Do NOT call blender tools yet.",
   releasing:
     "GPU lease is RELEASING — artifacts are being saved and the GPU destroyed. Do NOT call blender tools.",
-  destroyed: "GPU lease was released — a new one will be acquired automatically.",
+  destroyed:
+    "GPU lease was released — no GPU is active. A new one is NOT acquired automatically after a manual release.",
 };
 
 export function buildBlenderLeasePrefill(instanceId: string): string {
@@ -72,6 +73,23 @@ export function buildBlenderLeasePrefill(instanceId: string): string {
   } else if (lease.state === "provisioning" || lease.state === "recovering") {
     lines.push(
       `Tell the user the GPU is coming up automatically. Wait for the lease to reach "ready" before calling blender tools.`,
+    );
+  } else if (lease.state === "destroyed" && lease.manually_released) {
+    // The user clicked "Release GPU". Nothing will work until they click
+    // "Acquire GPU" — the lease is NOT auto-reacquired after a manual release.
+    lines.push(
+      `The user MANUALLY released the GPU (manually_released=1). It will NOT be reacquired automatically. The user must click "Acquire GPU" in the UI to continue.`,
+    );
+    lines.push(
+      `Tell the user the GPU is released and that scene work and rendering are unavailable until they click "Acquire GPU". Saved .blend work is preserved and will be restored on the next acquire.`,
+    );
+    lines.push(
+      `If you need more detail to answer the user, you may inspect the workspace state.json, /workspace/blends/<id>/, and any logs to confirm what was last saved.`,
+    );
+  } else if (lease.state === "destroyed") {
+    // Terminal but not manual (e.g. leftover row). Auto-acquire on next lane open.
+    lines.push(
+      `Tell the user the GPU was released and a new one will be acquired automatically when they next open the lane.`,
     );
   }
 

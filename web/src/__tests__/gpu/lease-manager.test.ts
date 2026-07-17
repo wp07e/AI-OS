@@ -433,3 +433,266 @@ describe("lease manager: queue pump", () => {
     expect(vast.mocks.createInstance).toHaveBeenCalledTimes(2);
   });
 });
+
+// ── New behavior: manually_released flag + release state machine ───────────
+
+/** Insert a lease row directly (used to script watchdog scenarios). */
+function seedLease(over: Partial<{
+  instance_id: string;
+  user_id: number;
+  state: string;
+  vast_id: number;
+  ssh_host: string;
+  ssh_port: number;
+  last_activity: number;
+  acquired_at: number;
+  manually_released: number;
+}> = {}): void {
+  db()
+    .prepare(
+      `INSERT INTO gpu_leases
+         (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port,
+          ssh_key_id, queue_position, queue_requested_at, acquired_at, last_activity,
+          last_synced_at, last_error, manually_released)
+       VALUES (@instance_id, @user_id, @state, @vast_id, 'RTX 4060', 0.07, @ssh_host, @ssh_port,
+          NULL, NULL, NULL, @acquired_at, @last_activity, NULL, NULL, @manually_released)`,
+    )
+    .run({
+      instance_id: "inst-1",
+      user_id: 1,
+      state: "ready",
+      vast_id: 500,
+      ssh_host: "1.2.3.4",
+      ssh_port: 12345,
+      last_activity: Date.now(),
+      acquired_at: Date.now(),
+      manually_released: 0,
+      ...over,
+    });
+}
+
+describe("lease manager: manual release state machine", () => {
+  it("release('manual') persists the row as destroyed + manually_released=1 (NOT deleted)", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+
+    const t0 = Date.now();
+    await mgr.release("inst-1", "manual");
+    const elapsed = Date.now() - t0;
+    // The DELETE returns immediately — heavy work (sync/destroy) is backgrounded.
+    expect(elapsed).toBeLessThan(500);
+
+    // Synchronous terminal state: the row is persisted so the UI can show
+    // "GPU Released" + Acquire, with ssh fields nulled (no live endpoint).
+    const row = mgr.get("inst-1");
+    expect(row).not.toBeNull();
+    expect(row!.state).toBe("destroyed");
+    expect(row!.manually_released).toBe(1);
+    expect(row!.ssh_host).toBeNull();
+    expect(row!.ssh_port).toBeNull();
+    // The instance is destroyed on the background promise; let it flush.
+    await new Promise((r) => setTimeout(r, 50));
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    // After the background destroy, the row's vast_id is nulled too.
+    expect(mgr.get("inst-1")!.vast_id).toBeNull();
+  });
+
+  it("release('idle-timeout') deletes the row (next view auto-acquires)", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+
+    await mgr.release("inst-1", "idle-timeout");
+
+    // Non-manual release deletes the row — no manual flag, no auto-acquire suppression.
+    expect(mgr.get("inst-1")).toBeNull();
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+  });
+
+  it("acquire on a destroyed+flagged row clears the flag and reprovisions", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    // Acquire → release manually → row is destroyed+flagged.
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+    await mgr.release("inst-1", "manual");
+    expect(vast.mocks.createInstance).toHaveBeenCalledOnce();
+
+    // Explicit re-acquire (the "Acquire GPU" button): should provision a NEW instance.
+    const lease = await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: true });
+
+    expect(lease.state).toBe("ready");
+    expect(lease.manually_released).toBe(0);
+    // Two creates: original + re-acquire.
+    expect(vast.mocks.createInstance).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("lease manager: watchdog respects manually_released", () => {
+  it("does NOT re-provision a manually-released lease whose instance is gone", async () => {
+    const vast = mockVast();
+    vast.mocks.getInstance.mockResolvedValue(null); // instance vanished
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+    });
+    // Seed a row that was manually released: state=destroyed, flag=1, but the
+    // background destroy hasn't nulled vast_id yet (process killed mid-destroy).
+    // Actually the watchdog query for liveness selects ready/provisioning/recovering,
+    // so to test the reProvision guard we seed a recovering row with the flag set
+    // (the realistic "flag set but not yet destroyed" race).
+    seedLease({ state: "recovering", manually_released: 1, vast_id: 500 });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 200));
+    mgr.stop();
+
+    // A manually-released GPU must NEVER be auto-reprovisioned. No createInstance.
+    expect(vast.mocks.createInstance).not.toHaveBeenCalled();
+  });
+
+  it("re-provisions an auto-acquired (non-manual) lease whose instance is gone", async () => {
+    const vast = mockVast();
+    vast.mocks.getInstance.mockResolvedValue(null);
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+    });
+    seedLease({ state: "ready", manually_released: 0, vast_id: 500 });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 200));
+    mgr.stop();
+
+    // Crash recovery still works for non-manual leases.
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    expect(vast.mocks.createInstance).toHaveBeenCalled();
+  });
+});
+
+describe("lease manager: reProvision destroy-failure safety", () => {
+  it("does NOT create a 2nd instance when destroy of the dead instance fails", async () => {
+    const vast = mockVast();
+    vast.mocks.getInstance.mockResolvedValue(null); // instance gone
+    vast.mocks.destroyInstance.mockRejectedValue(new Error("vastai 503"));
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+      destroyRetries: 2,
+      destroyBackoffMs: 5, // fast backoff so the test doesn't wait on the real 1.5s
+    });
+    seedLease({ state: "ready", manually_released: 0, vast_id: 500 });
+
+    mgr.start();
+    // Wait long enough for the retry+backoff to complete (2 attempts * 5ms + overhead).
+    await new Promise((r) => setTimeout(r, 300));
+    mgr.stop();
+    // Drain any in-flight tick so it can't touch the next test's seeded row.
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Destroy was attempted (with retries) but failed. No new instance created —
+    // the re-provision was aborted to avoid orphaning a billing instance.
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    expect(vast.mocks.createInstance).not.toHaveBeenCalled();
+    // Lease is left recovering with an error so the next tick retries.
+    const row = mgr.get("inst-1");
+    expect(row?.state).toBe("recovering");
+    expect(row?.last_error).toMatch(/destroy of dead instance 500 failed/);
+  });
+});
+
+describe("lease manager: reapReleases finalizes stranded rows", () => {
+  it("reaps a 'releasing' row older than the stale threshold", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+      destroyRetries: 1,
+    });
+    // Seed a 'releasing' row with last_activity 120s ago (beyond the 90s threshold).
+    seedLease({
+      state: "releasing",
+      vast_id: 500,
+      last_activity: Date.now() - 120_000,
+    });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 200));
+    mgr.stop();
+    // Let any in-flight tick from this manager finish before asserting, so it
+    // can't race the next test's seeded row (tests share the DB file).
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Stranded row reaped: instance destroyed, row deleted.
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    expect(mgr.get("inst-1")).toBeNull();
+  });
+
+  it("finalizes a 'destroyed' row whose vast_id wasn't nulled (unfinished destroy)", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+      destroyRetries: 1,
+    });
+    // A manual release marked the row destroyed but the background destroy was
+    // killed before nulling vast_id.
+    seedLease({ state: "destroyed", manually_released: 1, vast_id: 500 });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 200));
+    mgr.stop();
+
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    const row = mgr.get("inst-1");
+    expect(row).not.toBeNull();
+    expect(row!.state).toBe("destroyed");
+    expect(row!.vast_id).toBeNull(); // finalized
+  });
+});
+
+describe("lease manager: atomic concurrency reservation", () => {
+  it("respects maxConcurrent across concurrent acquires (no TOCTOU overrun)", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      maxConcurrent: 1,
+    });
+    db().prepare(
+      "INSERT INTO workflow_instances (id, user_id, workflow_type, title, folder) VALUES ('inst-2', 1, 'blender', 'T2', '/workspace/blends/inst-2')",
+    ).run();
+
+    // Fire both concurrently. acquireImpl yields at `await provisionInstance`, so
+    // the second call runs its claimConcurrencySlot transaction while the first
+    // is still mid-provision. The atomic reservation must see the first's row and
+    // queue the second (the old read-then-insert code could create two instances).
+    await Promise.all([
+      mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false }),
+      mgr.acquire({ instanceId: "inst-2", userId: 1, container: fakeContainer(), resume: false }),
+    ]);
+
+    // Exactly one provisioned; the other queued. (Old code could create two.)
+    const created = (vast.mocks.createInstance as ReturnType<typeof vi.fn>).mock.calls.length;
+    expect(created).toBe(1);
+    const states = [mgr.get("inst-1")?.state, mgr.get("inst-2")?.state].sort();
+    expect(states).toEqual(["queued", "ready"]);
+  });
+});
+

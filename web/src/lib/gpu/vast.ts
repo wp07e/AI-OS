@@ -54,7 +54,7 @@ const MIN_CUDA_BY_GPU: Record<string, number> = {
 export const DEFAULT_MAX_DPH = Number(process.env.GPU_MAX_DPH ?? 0.09);
 
 /** Default max concurrent GPU instances platform-wide. */
-export const DEFAULT_MAX_CONCURRENT = Number(process.env.GPU_MAX_CONCURRENT ?? 2);
+export const DEFAULT_MAX_CONCURRENT = Number(process.env.GPU_MAX_CONCURRENT ?? 5);
 
 /** Default idle lease timeout before auto-release (10 min). */
 export const DEFAULT_IDLE_TIMEOUT_MS = Number(process.env.GPU_IDLE_TIMEOUT_MS ?? 10 * 60 * 1000);

@@ -37,6 +37,12 @@ export interface LeaseInfo {
   last_synced_at?: number | null;
   /** Last error message (e.g. "vastai CLI not found", "no offers under cap"). */
   last_error?: string | null;
+  /**
+   * 1 when the user explicitly released the GPU. While set, the frontend does
+   * NOT auto-acquire on lane open — only an explicit "Acquire GPU" click clears
+   * it. Mirrors LeaseRow.manually_released (see lib/gpu/lease-manager.ts).
+   */
+  manually_released?: number;
 }
 
 /** Scene metadata, written by the bootstrap op. */

@@ -56,12 +56,14 @@ export function RenderPanel({
 
       {!leaseReady && (
         <p className="text-xs text-amber-400/80">
-          {lease?.state === "queued"
-            ? "Waiting for a GPU…"
-            : lease?.state === "provisioning" || lease?.state === "recovering"
-              ? "GPU is coming up…"
-              : "Acquiring GPU…"}
-          {" "}Rendering will be available once the GPU is ready.
+          {lease?.manually_released
+            ? "GPU released — click Acquire GPU above to continue."
+            : lease?.state === "queued"
+              ? "Waiting for a GPU…"
+              : lease?.state === "provisioning" || lease?.state === "recovering"
+                ? "GPU is coming up…"
+                : "Acquiring GPU…"}
+          {!lease?.manually_released && " Rendering will be available once the GPU is ready."}
         </p>
       )}
 

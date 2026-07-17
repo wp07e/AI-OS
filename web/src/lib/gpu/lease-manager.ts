@@ -64,6 +64,13 @@ export interface LeaseRow {
   last_synced_at: number | null;
   /** Last error message (cleared on successful state transition). Surfaced to UI. */
   last_error: string | null;
+  /**
+   * 1 when the user explicitly released the GPU (the "Release GPU" button).
+   * Suppresses auto-reacquire: the watchdog will NOT reProvision, and the
+   * frontend lane-open effect will NOT POST acquire. Cleared only by an
+   * explicit Acquire. The row is persisted in state "destroyed" while set.
+   */
+  manually_released: number;
 }
 
 const now = () => Date.now();
@@ -102,6 +109,10 @@ export interface LeaseManagerConfig {
   diskGb?: number;
   /** The onstart script body (read from /app/gpu/onstart.sh at runtime). */
   onstartScript?: string;
+  /** Max attempts for destroyInstanceWithRetry (default 3). */
+  destroyRetries?: number;
+  /** Base backoff ms for destroyInstanceWithRetry: delay = base * (attempt) (default 1500). */
+  destroyBackoffMs?: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -159,9 +170,11 @@ function upsertLease(row: LeaseRow): void {
     .prepare(
       `INSERT INTO gpu_leases
          (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, ssh_key_id,
-          queue_position, queue_requested_at, acquired_at, last_activity, last_synced_at, last_error)
+          queue_position, queue_requested_at, acquired_at, last_activity, last_synced_at, last_error,
+          manually_released)
        VALUES (@instance_id, @user_id, @state, @vast_id, @gpu_name, @dph, @ssh_host, @ssh_port, @ssh_key_id,
-          @queue_position, @queue_requested_at, @acquired_at, @last_activity, @last_synced_at, @last_error)
+          @queue_position, @queue_requested_at, @acquired_at, @last_activity, @last_synced_at, @last_error,
+          @manually_released)
        ON CONFLICT(instance_id) DO UPDATE SET
          state=excluded.state, vast_id=excluded.vast_id, gpu_name=excluded.gpu_name,
          dph=excluded.dph, ssh_host=excluded.ssh_host, ssh_port=excluded.ssh_port,
@@ -171,6 +184,18 @@ function upsertLease(row: LeaseRow): void {
          last_error=excluded.last_error`,
     )
     .run(row);
+}
+
+/**
+ * Set/clear manually_released for a lease. The flag is intentionally NOT part of
+ * upsertLease's ON CONFLICT update set, so ordinary state transitions can't
+ * clobber it — it moves only through this explicit setter (release sets it,
+ * acquire clears it).
+ */
+function setManuallyReleased(instanceId: string, value: 0 | 1): void {
+  db()
+    .prepare("UPDATE gpu_leases SET manually_released = ? WHERE instance_id = ?")
+    .run(value, instanceId);
 }
 
 function deleteLease(instanceId: string): void {
@@ -185,6 +210,31 @@ function countActiveLeases(): number {
     )
     .get() as { n: number };
   return r.n;
+}
+
+/**
+ * Atomically claim a concurrency slot for `instanceId`. Returns true if a slot
+ * was reserved (the instance should provision now), false if at capacity.
+ *
+ * This closes the TOCTOU window that existed when acquireImpl/queuePumpTick
+ * read countActiveLeases() and then inserted/promoted in two separate
+ * statements — two concurrent lanes could both pass the check and both
+ * provision, exceeding maxConcurrent. Here the capacity check and the
+ * provisioning-row write run in a single transaction so only one writer can
+ * observe a given count and claim a slot. The row is written with
+ * state='provisioning' so it immediately counts toward the active total.
+ */
+function claimConcurrencySlot(
+  lease: LeaseRow,
+  maxConcurrent: number,
+): boolean {
+  const txn = db().transaction(() => {
+    const active = countActiveLeases();
+    if (active >= maxConcurrent) return false;
+    upsertLease({ ...lease, state: "provisioning", manually_released: 0 });
+    return true;
+  });
+  return txn();
 }
 
 function queuedLeases(): LeaseRow[] {
@@ -216,18 +266,29 @@ export interface LeaseManager {
   start(): void;
   /** Stop the background loops (for graceful shutdown / tests). */
   stop(): void;
+
+  /**
+   * Push selected brand assets to the GPU instance for a Blender lane. Reads
+   * brand_selection.json from the workspace, resolves each selected asset to
+   * its file path, and SCPs it to /root/assets/ on the GPU. Skips files that
+   * already exist with the same size (no re-transfer). Best-effort: returns
+   * silently if no lease is active or the push fails.
+   */
+  pushBrandAssets(instanceId: string): Promise<void>;
 }
 
 export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManager {
   const vast = config.vast ?? defaultVast;
   const maxConcurrent = config.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
   const idleTimeoutMs = config.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-  const watchdogIntervalMs = config.watchdogIntervalMs ?? 30_000;
+  const watchdogIntervalMs = config.watchdogIntervalMs ?? 10_000;
   const syncIntervalMs = config.syncIntervalMs ?? 5_000;
   const queuePumpIntervalMs = config.queuePumpIntervalMs ?? 20_000;
   const idleReaperIntervalMs = config.idleReaperIntervalMs ?? Math.max(idleTimeoutMs / 4, 30_000);
   const gpuImage = config.gpuImage ?? DEFAULT_GPU_IMAGE;
   const diskGb = config.diskGb ?? DEFAULT_DISK_GB;
+  const destroyRetries = config.destroyRetries ?? 3;
+  const destroyBackoffMs = config.destroyBackoffMs ?? 1500;
 
   // exec/fileOps: use the injected values if provided (tests), otherwise the
   // real docker.ts implementations. fileOps is only used by tests; production
@@ -353,44 +414,9 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
           ).catch(() => {}); // best-effort
         }
 
-        // Push brand assets referenced in this lane's brand_selection.json to
-        // the GPU instance. Without this, bpy.data.images.load() fails because
-        // the asset path is in the app container, not on the GPU instance.
-        // Assets land at /root/assets/<filename> on the GPU.
-        const selectionPath = `/workspace/blends/${lease.instance_id}/brand_selection.json`;
-        const selRes = await exec(container, ["bash", "-lc", `cat '${selectionPath}' 2>/dev/null || true`], { user: APP_USER });
-        if (selRes.stdout.trim()) {
-          try {
-            const sel = JSON.parse(selRes.stdout);
-            const assetIds = new Set<string>();
-            // Collect all asset IDs from all categories (logo, photo, etc.)
-            for (const cat of Object.values(sel.assets ?? {})) {
-              if (Array.isArray(cat)) for (const id of cat) if (typeof id === "string") assetIds.add(id);
-            }
-            if (assetIds.size > 0) {
-              await exec(container, ["bash", "-lc", `${scpBase} root@${target.host} 'mkdir -p /root/assets'`], { user: APP_USER }).catch(() => {});
-              for (const id of assetIds) {
-                // Try common extensions — the file exists as <id>.<ext>
-                const findCmd = `ls /workspace/brand/assets/${id}.* 2>/dev/null | head -1`;
-                const found = await exec(container, ["bash", "-lc", findCmd], { user: APP_USER });
-                const localPath = found.stdout.trim();
-                if (localPath) {
-                  const filename = localPath.split("/").pop();
-                  await exec(
-                    container,
-                    ["bash", "-lc", `scp ${scpOpts} '${localPath}' 'root@${target.host}:/root/assets/${filename}'`],
-                    { user: APP_USER },
-                  ).catch((e) => {
-                    console.warn(`[lease-manager] scp brand asset ${filename} failed:`, (e as Error).message);
-                  });
-                  console.log(`[lease-manager] pushed brand asset ${filename} to GPU instance`);
-                }
-              }
-            }
-          } catch {
-            // brand_selection.json is malformed or absent — non-fatal
-          }
-        }
+        // Push brand assets selected for this lane to the GPU instance.
+        // The shared function handles size-checking (skips unchanged files).
+        await pushBrandAssetsImpl(lease.instance_id).catch(() => {});
       }
 
       // ── 6. Wait for the onstart script to bring up blender-mcp ──────────────
@@ -592,7 +618,15 @@ __STATE_EOF__`;
         }
       }
 
-      upsertLease({ ...lease, last_synced_at: now() });
+      // Bump only last_synced_at. Do NOT use upsertLease here: the `lease` arg is
+      // a snapshot taken before this call, and upsertLease's ON CONFLICT clause
+      // would write the snapshot's (possibly stale) state/vast_id/etc. back over
+      // the live row — e.g. clobbering a release's "destroyed" terminal state
+      // when the background release sync runs against a snapshot with
+      // state="ready". A targeted UPDATE touches only the timestamp.
+      db()
+        .prepare("UPDATE gpu_leases SET last_synced_at = ? WHERE instance_id = ?")
+        .run(now(), lease.instance_id);
     } catch (e) {
       // Sync failure is logged but non-fatal — the periodic sync will retry.
       console.error(`[lease-manager] syncDown failed for ${lease.instance_id}:`, (e as Error).message);
@@ -608,33 +642,67 @@ __STATE_EOF__`;
     resume: boolean;
   }): Promise<LeaseRow> {
     const existing = getLease(opts.instanceId);
-    if (existing) return existing; // idempotent
-
-    // Concurrency check. If at capacity, queue.
-    if (countActiveLeases() >= maxConcurrent) {
-      const queued: LeaseRow = {
-        instance_id: opts.instanceId,
-        user_id: opts.userId,
-        state: "queued",
+    if (existing) {
+      // A lease already exists for this lane. Three cases:
+      //  - Active (queued/provisioning/ready/recovering/releasing): idempotent
+      //    no-op — return the current row.
+      //  - Destroyed + manually_released=1: the user explicitly released the GPU
+      //    and is now clicking "Acquire GPU". Clear the flag and reprovision.
+      //  - Destroyed + manually_released=0: leftover terminal row (rare) — also
+      //    reprovision.
+      const isTerminal = existing.state === "destroyed" || existing.manually_released === 1;
+      if (!isTerminal) return existing;
+      // Explicit re-acquire: clear the flag, then fall through to provision. We
+      // reuse the existing row (preserving user_id etc.) but reset instance
+      // fields so provisionInstance starts clean. resume:true pushes the saved
+      // .blend back up so the scene is restored.
+      setManuallyReleased(opts.instanceId, 0);
+      const reset: LeaseRow = {
+        ...existing,
+        state: "provisioning",
         vast_id: null,
         gpu_name: null,
         dph: null,
         ssh_host: null,
         ssh_port: null,
         ssh_key_id: null,
-        queue_position: queuedLeases().length,
-        queue_requested_at: now(),
-        acquired_at: null,
+        queue_position: null,
+        queue_requested_at: null,
+        acquired_at: now(),
         last_activity: now(),
         last_synced_at: null,
         last_error: null,
+        manually_released: 0,
       };
-      upsertLease(queued);
-      return queued;
+      // Atomically reserve a slot (or queue if at capacity) before provisioning.
+      if (!claimConcurrencySlot(reset, maxConcurrent)) {
+        const queued: LeaseRow = { ...reset, state: "queued", queue_position: queuedLeases().length, queue_requested_at: now() };
+        upsertLease(queued);
+        return queued;
+      }
+      try {
+        await provisionInstance(getLease(opts.instanceId) ?? reset, opts.container, true);
+      } catch (e) {
+        const msg = (e as Error).message;
+        console.error(`[lease-manager] re-acquire provision failed for ${opts.instanceId}:`, msg);
+        const cur = getLease(opts.instanceId) ?? reset;
+        upsertLease({
+          ...cur,
+          state: "queued",
+          vast_id: null,
+          queue_requested_at: now(),
+          queue_position: queuedLeases().length,
+          last_error: msg,
+        });
+      }
+      return getLease(opts.instanceId)!;
     }
 
-    // Create a provisioning row immediately (so re-entrant calls are idempotent).
-    const lease: LeaseRow = {
+    // ── Fresh acquire (no existing row) ──────────────────────────────────────
+    // Build the base row once. The capacity check + provisioning-row write are
+    // done atomically by claimConcurrencySlot to close the TOCTOU window where
+    // two concurrent lanes could both pass the count and both provision.
+    const base: LeaseRow = {
       instance_id: opts.instanceId,
       user_id: opts.userId,
       state: "provisioning",
@@ -650,17 +718,28 @@ __STATE_EOF__`;
       last_activity: now(),
       last_synced_at: null,
       last_error: null,
+      manually_released: 0,
     };
-    upsertLease(lease);
+
+    if (!claimConcurrencySlot(base, maxConcurrent)) {
+      const queued: LeaseRow = {
+        ...base,
+        state: "queued",
+        queue_position: queuedLeases().length,
+        queue_requested_at: now(),
+      };
+      upsertLease(queued);
+      return queued;
+    }
 
     try {
-      await provisionInstance(lease, opts.container, opts.resume);
+      await provisionInstance(getLease(opts.instanceId) ?? base, opts.container, opts.resume);
     } catch (e) {
       // Provisioning failed — store the error so the UI can show WHY, then move
       // to queued so the queue pump can retry when conditions improve.
       const msg = (e as Error).message;
       console.error(`[lease-manager] provision failed for ${opts.instanceId}:`, msg);
-      const cur = getLease(opts.instanceId) ?? lease;
+      const cur = getLease(opts.instanceId) ?? base;
       upsertLease({
         ...cur,
         state: "queued",
@@ -673,46 +752,157 @@ __STATE_EOF__`;
     return getLease(opts.instanceId)!;
   }
 
+  // Tracked in-flight vast.ai destroys, so background releases can be observed
+  // and a second release for the same instance can await the first instead of
+  // racing. Keyed by vast_id.
+  const pendingDestroys = new Map<number, Promise<void>>();
+
+  /**
+   * Destroy a vast.ai instance with a bounded retry. Returns true on success.
+   * Network blips and transient vast.ai errors are common; one swallow-on-error
+   * left orphaned billing instances (the old reProvision path). We retry a
+   * couple of times with a short backoff before giving up.
+   */
+  async function destroyInstanceWithRetry(vastId: number): Promise<boolean> {
+    const existing = pendingDestroys.get(vastId);
+    if (existing) {
+      await existing.catch(() => {});
+      return true;
+    }
+    const attempt = (async () => {
+      for (let i = 0; i < destroyRetries; i++) {
+        try {
+          await vast.destroyInstance(vastId);
+          return;
+        } catch (e) {
+          console.warn(`[lease-manager] destroy attempt ${i + 1} failed for ${vastId}:`, (e as Error).message);
+          if (i < destroyRetries - 1) await new Promise((r) => setTimeout(r, destroyBackoffMs * (i + 1)));
+        }
+      }
+      throw new Error(`destroy failed after retries for ${vastId}`);
+    })();
+    pendingDestroys.set(vastId, attempt);
+    try {
+      await attempt;
+      return true;
+    } catch (e) {
+      console.error(`[lease-manager] ${vastId}:`, (e as Error).message);
+      return false;
+    } finally {
+      pendingDestroys.delete(vastId);
+    }
+  }
+
+  /**
+   * Save the .blend on the GPU instance, sync artifacts down, and stop the
+   * tunnel. Shared by all release reasons. Best-effort per step (sync failure
+   * must NOT block destroy); returns nothing.
+   */
+  async function saveSyncAndStopTunnel(lease: LeaseRow, container: ContainerRow | undefined): Promise<void> {
+    // 1. Save the .blend on the instance.
+    if (lease.ssh_host && lease.ssh_port && lease.vast_id) {
+      // Ask Blender to save via the socket through the tunnel.
+      if (container) {
+        await exec(
+          container,
+          [
+            "bash",
+            "-lc",
+            `echo '{"type":"execute_code","params":{"code":"import bpy; bpy.ops.wm.save_as_mainfile(filepath=\\"/root/blender/scene.blend\\")"}}' | timeout 10 nc -q1 127.0.0.1 ${BLENDER_PORT} 2>/dev/null || true`,
+          ],
+          { user: APP_USER },
+        ).catch(() => {});
+      }
+    }
+    // 2. Sync artifacts down (best-effort; destroy runs regardless).
+    if (container) await syncDown(lease, container).catch((e) => {
+      console.error(`[lease-manager] syncDown failed for ${lease.instance_id}:`, (e as Error).message);
+    });
+    // 3. Kill the tunnel.
+    if (container) await stopTunnel(container).catch(() => {});
+  }
+
   async function releaseImpl(instanceId: string, reason: string = "manual"): Promise<void> {
     const lease = getLease(instanceId);
     if (!lease) return;
     if (lease.state === "destroyed") return;
     console.log(`[lease-manager] releasing ${instanceId} (reason: ${reason})`);
-    upsertLease({ ...lease, state: "releasing" });
 
     const container = db()
       .prepare("SELECT * FROM containers WHERE user_id = ?")
       .get(lease.user_id) as ContainerRow | undefined;
 
-    try {
-      // 1. Save the .blend on the instance.
-      if (lease.ssh_host && lease.ssh_port && lease.vast_id) {
-        // Ask Blender to save via the socket through the tunnel.
+    if (reason === "manual") {
+      // ── Manual release (the "Release GPU" button) ─────────────────────────
+      // The row reaches its kill-safe terminal state SYNCHRONOUSLY so the DELETE
+      // request returns immediately and the UI shows "GPU Released" + "Acquire
+      // GPU". ALL slow work — Blender save, artifact sync-down, tunnel stop,
+      // vast.ai destroy, ssh-key cleanup — runs on a tracked background promise.
+      // The DELETE route handler awaits release(), so anything awaited here
+      // blocks the request (and with real SSH latency the save+sync+stop can
+      // take minutes — that was the hang). Data safety is preserved: the
+      // background sync runs from a SNAPSHOT of the pre-release lease (ssh fields
+      // intact) so it can still reach the instance, and the 5s periodic syncTick
+      // bounds .blend staleness to ~5s if the process is killed before the
+      // background sync completes.
+      const vastId = lease.vast_id;
+      const sshKeyId = lease.ssh_key_id;
+      // Persist the kill-safe terminal state SYNCHRONOUSLY: destroyed + flag +
+      // ssh fields nulled. The UI sees "GPU Released" + Acquire immediately; any
+      // provisioning/watchdog sees no live SSH endpoint. vast_id stays set until
+      // the background destroy confirms, so the reaper can finalize it if the
+      // process dies mid-destroy.
+      upsertLease({
+        ...lease,
+        state: "destroyed",
+        manually_released: 1,
+        ssh_host: null,
+        ssh_port: null,
+      });
+      setManuallyReleased(instanceId, 1);
+      // Background: save → sync → stop tunnel → destroy → delete ssh key → null
+      // instance fields. Tracked so a second release awaits it instead of racing;
+      // the watchdog reaper also finalizes destroyed rows whose vast_id is still
+      // set (process was killed mid-destroy).
+      const snapshot = { ...lease };
+      void (async () => {
         if (container) {
-          await exec(
-            container,
-            [
-              "bash",
-              "-lc",
-              `echo '{"type":"execute_code","params":{"code":"import bpy; bpy.ops.wm.save_as_mainfile(filepath=\\"/root/blender/scene.blend\\")"}}' | timeout 10 nc -q1 127.0.0.1 ${BLENDER_PORT} 2>/dev/null || true`,
-            ],
-            { user: APP_USER },
-          ).catch(() => {});
+          await saveSyncAndStopTunnel(snapshot, container).catch((e) =>
+            console.error(`[lease-manager] background sync/stop failed for ${instanceId}:`, (e as Error).message),
+          );
+          await writeWorkflowPhase(snapshot, container, "idle", { active: null }).catch(() => {});
         }
-      }
-      // 2. Sync artifacts down (best-effort; destroy runs regardless).
-      if (container) await syncDown(lease, container);
-      // 3. Kill the tunnel.
-      if (container) await stopTunnel(container);
+        if (vastId) {
+          await destroyInstanceWithRetry(vastId).catch(() => {});
+        }
+        if (sshKeyId) {
+          await vast.deleteSshKey(sshKeyId).catch(() => {});
+        }
+        // Null out the instance fields now that the instance is gone. Re-read in
+        // case a re-acquire reset them in the meantime.
+        const cur = getLease(instanceId);
+        if (cur && cur.manually_released === 1 && cur.state === "destroyed") {
+          upsertLease({ ...cur, vast_id: null, ssh_host: null, ssh_port: null, ssh_key_id: null });
+        }
+      })().catch((e) => console.error(`[lease-manager] background release failed for ${instanceId}:`, (e as Error).message));
+      return;
+    }
+
+    // ── Non-manual release (idle-timeout, lane-deleted, …) ──────────────────
+    // Same behavior as before: sync → destroy (in finally) → deleteLease. No row
+    // remains, so the next lane open auto-acquires (state="none"). This keeps
+    // crash/idle recovery "just works" — only an explicit user release suppresses
+    // auto-reacquire.
+    upsertLease({ ...lease, state: "releasing" });
+    try {
+      await saveSyncAndStopTunnel(lease, container);
     } finally {
-      // 4. ALWAYS destroy (storage fees accrue until destroy). In finally so it
+      // ALWAYS destroy (storage fees accrue until destroy). In finally so it
       // runs even if sync/save failed.
       if (lease.vast_id) {
-        await vast.destroyInstance(lease.vast_id).catch((e) => {
-          console.error(`[lease-manager] destroy failed for ${lease.vast_id}:`, (e as Error).message);
-        });
+        await destroyInstanceWithRetry(lease.vast_id);
       }
-      // 5. Clean up the SSH key from vast.ai (best-effort — the key is harmless
+      // Clean up the SSH key from vast.ai (best-effort — the key is harmless
       // if left behind since no matching instance exists, but tidying avoids
       // accumulating stale keys across many leases).
       if (lease.ssh_key_id) {
@@ -724,25 +914,99 @@ __STATE_EOF__`;
 
   // ── Watchdog (liveness + recovery) ────────────────────────────────────────
 
+  /**
+   * Age beyond which a 'releasing' row is considered stranded (its releaseImpl
+   * was killed — e.g. the request hit maxDuration=300s mid-destroy — before it
+   * could call deleteLease / reach the destroyed terminal state). The watchdog
+   * reaps such rows so the UI never gets stuck on "Releasing…" forever.
+   */
+  const STALE_RELEASING_MS = 90_000;
+
   async function watchdogTick(): Promise<void> {
-    const leases = db()
+    // 1. Liveness + recovery for active leases.
+    const active = db()
       .prepare("SELECT * FROM gpu_leases WHERE state IN ('ready','provisioning','recovering')")
       .all() as LeaseRow[];
-    for (const lease of leases) {
+    for (const lease of active) {
       // Serialize per-instance.
-      
       await withLock(lease.instance_id, async () => checkAndRecover(lease)).catch((e) =>
         console.error(`[watchdog] ${lease.instance_id}:`, (e as Error).message),
       );
     }
+    // 2. Reap stranded/incomplete release rows. Two sub-cases:
+    //    - 'releasing' older than STALE_RELEASING_MS: releaseImpl was killed.
+    //      Finalize it (sync is best-effort again here, then destroy + terminal).
+    //    - 'destroyed' with a non-null vast_id: a manual release marked the row
+    //      terminal but its background destroy didn't finish (process killed).
+    //      Destroy the lingering instance + null the fields.
+    await reapReleases();
+  }
+
+  /**
+   * Finalize release rows left incomplete by a killed process. Idempotent: a
+   * successful manual release leaves state='destroyed' with vast_id=null, so the
+   * destroyed-with-vast_id query returns nothing for it. Each reap runs under
+   * the per-instance lock so it can't race acquire/watchdog for the same row.
+   */
+  async function reapReleases(): Promise<void> {
+    const staleReleasing = db()
+      .prepare(
+        "SELECT * FROM gpu_leases WHERE state = 'releasing' AND last_activity < ?",
+      )
+      .all(now() - STALE_RELEASING_MS) as LeaseRow[];
+    for (const lease of staleReleasing) {
+      await withLock(lease.instance_id, async () => {
+        const cur = getLease(lease.instance_id);
+        if (!cur || cur.state !== "releasing") return; // resolved since the query
+        console.warn(`[watchdog] ${lease.instance_id}: reaping stranded 'releasing' row (last_activity ${Math.round((now() - cur.last_activity) / 1000)}s ago)`);
+        const container = db()
+          .prepare("SELECT * FROM containers WHERE user_id = ?")
+          .get(cur.user_id) as ContainerRow | undefined;
+        if (container) await saveSyncAndStopTunnel(cur, container).catch(() => {});
+        if (cur.vast_id) await destroyInstanceWithRetry(cur.vast_id).catch(() => {});
+        if (cur.ssh_key_id) await vast.deleteSshKey(cur.ssh_key_id).catch(() => {});
+        // No manually_released context here — a stranded non-manual release is
+        // best finalized by deleting the row (so the next view auto-acquires),
+        // matching the non-manual release path.
+        deleteLease(cur.instance_id);
+      }).catch((e) => console.error(`[watchdog] reap releasing ${lease.instance_id}:`, (e as Error).message));
+    }
+
+    const unfinishedDestroyed = db()
+      .prepare("SELECT * FROM gpu_leases WHERE state = 'destroyed' AND vast_id IS NOT NULL")
+      .all() as LeaseRow[];
+    for (const lease of unfinishedDestroyed) {
+      await withLock(lease.instance_id, async () => {
+        const cur = getLease(lease.instance_id);
+        if (!cur || cur.state !== "destroyed" || !cur.vast_id) return;
+        console.warn(`[watchdog] ${lease.instance_id}: finalizing unfinished destroy for vast_id ${cur.vast_id}`);
+        await destroyInstanceWithRetry(cur.vast_id).catch(() => {});
+        const after = getLease(lease.instance_id);
+        if (after && after.state === "destroyed") {
+          upsertLease({ ...after, vast_id: null, ssh_key_id: null });
+        }
+      }).catch((e) => console.error(`[watchdog] reap destroyed ${lease.instance_id}:`, (e as Error).message));
+    }
   }
 
   async function checkAndRecover(lease: LeaseRow): Promise<void> {
-    if (!lease.vast_id) return;
     const current = getLease(lease.instance_id);
-    if (!current || current.state === "releasing" || current.state === "destroyed") return;
+    if (!current) return;
+    // Re-check the live state inside the lock. A release may have flipped the
+    // row to releasing/destroyed between the watchdog's SELECT and here.
+    if (current.state === "releasing" || current.state === "destroyed") return;
+    // If the user explicitly released this GPU, NEVER auto-recover — even if a
+    // stale watchdog snapshot selected it. Recovery is for genuine crashes only.
+    if (current.manually_released === 1) return;
+    // Use the LIVE vast_id, not the captured snapshot's. A prior reProvision may
+    // have nulled then reset vast_id; acting on a stale value could destroy the
+    // wrong instance or spin up a duplicate.
+    const vastId = current.vast_id;
+    const sshHost = current.ssh_host;
+    const sshPort = current.ssh_port;
+    if (!vastId) return;
 
-    const inst = await vast.getInstance(lease.vast_id).catch(() => null);
+    const inst = await vast.getInstance(vastId).catch(() => null);
     const container = db()
       .prepare("SELECT * FROM containers WHERE user_id = ?")
       .get(lease.user_id) as ContainerRow | undefined;
@@ -750,7 +1014,7 @@ __STATE_EOF__`;
     // ── RUNNING: check tunnel health ──────────────────────────────────────
     if (inst && inst.cur_state === "running") {
       // Only check tunnel for leases that are ready (not still provisioning).
-      if (lease.ssh_host && lease.ssh_port && container && current.state === "ready") {
+      if (sshHost && sshPort && container && current.state === "ready") {
         const probe = await exec(
           container,
           ["bash", "-lc", `nc -z 127.0.0.1 ${BLENDER_PORT} 2>/dev/null && echo ok || echo dead`],
@@ -758,7 +1022,7 @@ __STATE_EOF__`;
         ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
         if (!probe.stdout.includes("ok")) {
           await stopTunnel(container);
-          await startTunnel(container, { host: lease.ssh_host, port: lease.ssh_port });
+          await startTunnel(container, { host: sshHost, port: sshPort });
           console.log(`[watchdog] ${lease.instance_id}: re-established dead tunnel`);
         }
       }
@@ -772,19 +1036,19 @@ __STATE_EOF__`;
     //    "not running but may be recoverable". Rather than enumerate them, we
     //    treat any non-running state the same way: attempt resume, fall back
     //    to re-provision.
-    console.log(`[watchdog] ${lease.instance_id}: instance ${lease.vast_id} in state ${inst?.cur_state ?? "gone"}, attempting recovery`);
+    console.log(`[watchdog] ${lease.instance_id}: instance ${vastId} in state ${inst?.cur_state ?? "gone"}, attempting recovery`);
     upsertLease({ ...current, state: "recovering" });
     if (container) {
-      await writeWorkflowPhase(lease, container, "recovering", {
+      await writeWorkflowPhase(current, container, "recovering", {
         active: { op: "recover", label: `GPU ${inst?.cur_state ?? "lost"} — reconnecting…` },
       });
     }
     if (inst) {
       // Instance still exists but isn't running. Try to start it.
       try {
-        await vast.startInstance(lease.vast_id);
-        await vast.waitForRunning(lease.vast_id);
-        const target = await vast.sshUrl(lease.vast_id);
+        await vast.startInstance(vastId);
+        await vast.waitForRunning(vastId);
+        const target = await vast.sshUrl(vastId);
         if (target && container) {
           upsertLease({ ...current, ssh_host: target.host, ssh_port: target.port, state: "recovering" });
           await stopTunnel(container);
@@ -792,7 +1056,7 @@ __STATE_EOF__`;
           await startTunnel(container, target);
         }
         upsertLease({ ...getLease(lease.instance_id)!, state: "ready", last_activity: now(), last_error: null });
-        console.log(`[watchdog] ${lease.instance_id}: resumed instance ${lease.vast_id} from state ${inst.cur_state}`);
+        console.log(`[watchdog] ${lease.instance_id}: resumed instance ${vastId} from state ${inst.cur_state}`);
         return;
       } catch (e) {
         console.error(`[watchdog] ${lease.instance_id}: resume from ${inst.cur_state} failed, re-provisioning:`, (e as Error).message);
@@ -805,6 +1069,13 @@ __STATE_EOF__`;
   /** Destroy the dead instance and provision a fresh one, pushing the .blend up. */
   async function reProvision(lease: LeaseRow, container: ContainerRow | undefined): Promise<void> {
     if (!container) return;
+    // Never auto-reprovision a manually-released GPU. The user explicitly gave
+    // it up; recovery is for genuine crashes only.
+    if (lease.manually_released === 1) {
+      console.log(`[watchdog] ${lease.instance_id}: skipping re-provision (manually released)`);
+      upsertLease({ ...lease, state: "destroyed", vast_id: null, ssh_host: null, ssh_port: null });
+      return;
+    }
     upsertLease({ ...lease, state: "recovering" });
     // Reset the workflow state so the viewport doesn't stay stuck on a stale
     // phase (e.g. "starting" from a render that was killed when the GPU died).
@@ -812,8 +1083,21 @@ __STATE_EOF__`;
       active: { op: "recover", label: "GPU was lost — reconnecting…" },
       errors: [`GPU instance ${lease.vast_id} was lost; a new one is being provisioned.`],
     });
+    // Destroy the dead instance WITHOUT swallowing failures. The old code did
+    // `.catch(() => {})` then immediately created a fresh instance, so a failed
+    // destroy + successful create left TWO billing instances under one lease
+    // (with the old vast_id already nulled, hence untracked). Now: if destroy
+    // fails after retries, we ABORT the re-provision and leave the lease
+    // recovering with an error so the next watchdog tick retries, rather than
+    // risk a second instance.
     if (lease.vast_id) {
-      await vast.destroyInstance(lease.vast_id).catch(() => {});
+      const destroyed = await destroyInstanceWithRetry(lease.vast_id);
+      if (!destroyed) {
+        const msg = `destroy of dead instance ${lease.vast_id} failed; deferring re-provision to next watchdog tick`;
+        console.error(`[watchdog] ${lease.instance_id}: ${msg}`);
+        upsertLease({ ...lease, state: "recovering", last_error: msg });
+        return;
+      }
     }
     upsertLease({ ...lease, state: "provisioning", vast_id: null, ssh_host: null, ssh_port: null });
     try {
@@ -834,8 +1118,10 @@ __STATE_EOF__`;
     for (const lease of leases) {
       if (now() - lease.last_activity > idleTimeoutMs) {
         console.log(`[idle-reaper] releasing idle lease ${lease.instance_id} (idle ${Math.round((now() - lease.last_activity) / 1000)}s)`);
-        
-        await releaseImpl(lease.instance_id, "idle-timeout").catch((e) =>
+        // Run under the per-instance lock. releaseImpl does long async work
+        // (save + sync + destroy); without the lock, a concurrent watchdog tick
+        // could reProvision the same instance mid-release, creating a second GPU.
+        await withLock(lease.instance_id, () => releaseImpl(lease.instance_id, "idle-timeout")).catch((e) =>
           console.error(`[idle-reaper] release failed:`, (e as Error).message),
         );
       }
@@ -862,7 +1148,6 @@ __STATE_EOF__`;
   // ── Queue pump ────────────────────────────────────────────────────────────
 
   async function queuePumpTick(): Promise<void> {
-    if (countActiveLeases() >= maxConcurrent) return;
     const queue = queuedLeases();
     if (queue.length === 0) return;
     // Re-search to confirm a sub-cap offer exists before granting.
@@ -873,8 +1158,15 @@ __STATE_EOF__`;
       .prepare("SELECT * FROM containers WHERE user_id = ?")
       .get(next.user_id) as ContainerRow | undefined;
     if (!container) return;
-    // Promote from queued → provisioning, then provision.
-    upsertLease({ ...next, state: "provisioning", acquired_at: now(), queue_position: null });
+    // Atomically reserve a slot and promote queued → provisioning. Doing the
+    // capacity check + the row update in one transaction closes the TOCTOU
+    // window where two pump ticks (or a pump + an acquire) could both pass the
+    // count and both provision, exceeding maxConcurrent.
+    const promoted = claimConcurrencySlot(
+      { ...next, queue_position: null },
+      maxConcurrent,
+    );
+    if (!promoted) return;
     await withLock(next.instance_id, () => provisionInstance(getLease(next.instance_id)!, container, true)).catch((e) => {
       const msg = (e as Error).message;
       console.error(`[queue-pump] provision failed for ${next.instance_id}:`, msg);
@@ -889,6 +1181,67 @@ __STATE_EOF__`;
     queue.forEach((l, i) => {
       if (l.queue_position !== i) upsertLease({ ...l, queue_position: i });
     });
+  }
+
+  // ── Brand asset push ──────────────────────────────────────────────────────
+
+  /**
+   * Push selected brand assets to the GPU instance. Reads brand_selection.json
+   * from the workspace, resolves each selected asset, and SCPs it to
+   * /root/assets/ on the GPU. Skips files that already match in size.
+   */
+  async function pushBrandAssetsImpl(instanceId: string): Promise<void> {
+    const lease = getLease(instanceId);
+    if (!lease || lease.state !== "ready" || !lease.ssh_host || !lease.ssh_port) return;
+    const container = db()
+      .prepare("SELECT * FROM containers WHERE user_id = ?")
+      .get(lease.user_id) as ContainerRow | undefined;
+    if (!container) return;
+
+    // Read brand_selection.json from the workspace.
+    const selectionPath = `/workspace/blends/${instanceId}/brand_selection.json`;
+    const selRes = await exec(container, ["bash", "-lc", `cat '${selectionPath}' 2>/dev/null || true`], { user: APP_USER });
+    if (!selRes.stdout.trim()) return;
+
+    let assetIds: Set<string>;
+    try {
+      const sel = JSON.parse(selRes.stdout);
+      assetIds = new Set<string>();
+      for (const cat of Object.values(sel.assets ?? {})) {
+        if (Array.isArray(cat)) for (const id of cat) if (typeof id === "string") assetIds.add(id);
+      }
+    } catch {
+      return; // malformed selection — non-fatal
+    }
+    if (assetIds.size === 0) return;
+
+    const scpBase = `ssh -i ${SSH_KEY_PATH} -p ${lease.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
+    const scpOpts = `-i ${SSH_KEY_PATH} -P ${lease.ssh_port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
+
+    // Ensure /root/assets exists on the GPU instance.
+    await exec(container, ["bash", "-lc", `${scpBase} root@${lease.ssh_host} 'mkdir -p /root/assets'`], { user: APP_USER }).catch(() => {});
+
+    for (const id of assetIds) {
+      // Resolve the local file path: /workspace/brand/assets/<id>.<ext>
+      const found = await exec(container, ["bash", "-lc", `ls /workspace/brand/assets/${id}.* 2>/dev/null | head -1`], { user: APP_USER });
+      const localPath = found.stdout.trim();
+      if (!localPath) continue;
+      const filename = localPath.split("/").pop()!;
+
+      // Size-check: skip if the remote file already has the same size.
+      const localSize = await localFileSize(container, localPath);
+      const remoteSize = await remoteFileSize(container, lease.ssh_host, lease.ssh_port, `/root/assets/${filename}`);
+      if (localSize !== null && remoteSize !== null && localSize === remoteSize) continue;
+
+      await exec(
+        container,
+        ["bash", "-lc", `scp ${scpOpts} '${localPath}' 'root@${lease.ssh_host}:/root/assets/${filename}'`],
+        { user: APP_USER },
+      ).catch((e) => {
+        console.warn(`[lease-manager] scp brand asset ${filename} failed:`, (e as Error).message);
+      });
+      console.log(`[lease-manager] pushed brand asset ${filename} to GPU instance`);
+    }
   }
 
   // ── Public API ────────────────────────────────────────────────────────────
@@ -909,6 +1262,7 @@ __STATE_EOF__`;
     stop() {
       while (timers.length) clearInterval(timers.pop());
     },
+    pushBrandAssets: pushBrandAssetsImpl,
   };
 }
 

@@ -6,10 +6,9 @@ import type { LeaseInfo } from "./types";
 /**
  * The GPU lease status pill. Shown at the top of the Blender canvas.
  *
- * Acquisition is AUTOMATIC (fires on lane open) — there is no "Acquire" button.
- * This component is status-only, plus an optional "Release GPU now" for users
- * who want to stop billing early. Idle-timeout and lane-leave auto-release
- * handle the normal case.
+ * Acquisition is AUTOMATIC on lane open; this component also offers a manual
+ * "Acquire GPU" (after an explicit release) and "Release GPU" (to stop billing
+ * early).
  */
 export function LeasePill({
   lease,
@@ -49,7 +48,8 @@ export function LeasePill({
   // Show the boot panel (spinner or logs) whenever the lease is booting —
   // bootLogs may be undefined until the instance's container exists.
   const isBooting = state === "provisioning" || state === "recovering";
-  // Show "Acquire GPU" only when there's no active lease (released/destroyed).
+  // Show "Acquire GPU" only when there's no active lease. After a manual release
+  // the server sets state="destroyed", which is covered here.
   const canAcquire = state === "none" || state === "destroyed";
 
   return (

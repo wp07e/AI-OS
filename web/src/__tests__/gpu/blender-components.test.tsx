@@ -1,8 +1,9 @@
 /**
  * Component + unit tests for the Blender workflow UI pieces.
  *
- * - LeasePill: renders all lease states correctly; no "Acquire" button
- *   (acquisition is automatic); "Release GPU" appears only when ready/recovering.
+ * - LeasePill: renders all lease states correctly; shows "Acquire GPU" only
+ *   when no lease is active (after a release), "Release GPU" only when
+ *   ready/recovering.
  * - RenderPanel: validates settings; disabled until lease is ready.
  * - buildBlenderLeasePrefill: produces the right text per lease state; empty
  *   for non-Blender lanes.
@@ -63,7 +64,7 @@ describe("LeasePill", () => {
   it("calls onRelease when Release GPU is clicked", () => {
     const onRelease = vi.fn(async () => {});
     const lease: LeaseInfo = { instance_id: "x", state: "ready", gpu_name: "RTX 4060", dph: 0.07 };
-    render(<LeasePill lease={lease} onRelease={onRelease} />);
+    render(<LeasePill lease={lease} onRelease={onRelease} onAcquire={vi.fn()} />);
     fireEvent.click(screen.getByText("Release GPU"));
     expect(onRelease).toHaveBeenCalledOnce();
   });

@@ -39,6 +39,11 @@ export function useBlenderState(instanceId: string, folder: string) {
 export function useBlenderLease(instanceId: string) {
   const [lease, setLease] = useState<LeaseInfo | null>(null);
   const [bootLogs, setBootLogs] = useState<string | undefined>(undefined);
+  // Whether the first GET has resolved. The lane-open auto-acquire effect must
+  // NOT fire until the lease state is actually loaded — otherwise a remount
+  // (lane switch back, StrictMode, HMR) would see lease=null and fire acquire
+  // before we know the GPU was manually released.
+  const [loaded, setLoaded] = useState(false);
 
   const refreshLease = useCallback(async () => {
     try {
@@ -66,6 +71,7 @@ export function useBlenderLease(instanceId: string) {
           const data = await res.json();
           setLease(data.lease ?? null);
           setBootLogs(data.bootLogs);
+          setLoaded(true);
           consecutiveErrors = 0;
         }
       } catch {
@@ -90,7 +96,7 @@ export function useBlenderLease(instanceId: string) {
     };
   }, [instanceId]);
 
-  return { lease, bootLogs, refreshLease };
+  return { lease, bootLogs, loaded, refreshLease };
 }
 
 function parseActive(raw: unknown): BlenderState["active"] {

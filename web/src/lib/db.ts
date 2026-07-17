@@ -28,6 +28,7 @@ function openDb(): Database.Database {
   migrateOpencodeSessionsContainerId(conn);
   migrateAdminColumn(conn);
   migrateGpuLeasesLastError(conn);
+  migrateGpuLeasesManuallyReleased(conn);
   seedDefaultUser(conn);
   _db = conn;
   return conn;
@@ -150,6 +151,7 @@ function migrate(conn: Database.Database) {
       last_activity INTEGER NOT NULL, -- ms epoch, bumped on every poll/render
       last_synced_at INTEGER,         -- ms epoch of the last successful .blend sync-down
       last_error     TEXT,            -- last provisioning/recovery error (surfaced to UI)
+      manually_released INTEGER NOT NULL DEFAULT 0, -- 1 when the user explicitly released the GPU; suppresses auto-reacquire (watchdog reProvision + frontend lane-open effect) until an explicit Acquire clears it
       FOREIGN KEY(instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
     );
   `);
@@ -164,6 +166,22 @@ export function migrateGpuLeasesLastError(conn: Database.Database): void {
   }
   if (!cols.some((c) => c.name === "ssh_key_id")) {
     conn.exec("ALTER TABLE gpu_leases ADD COLUMN ssh_key_id INTEGER");
+  }
+}
+
+/**
+ * Add manually_released to pre-existing gpu_leases tables (idempotent).
+ *
+ * Tracks whether the user explicitly released the GPU. When 1, the lease row
+ * is persisted in state "destroyed" and auto-reacquire is suppressed on both
+ * the server (watchdog reProvision) and the client (lane-open effect) until an
+ * explicit Acquire clears the flag. See lib/gpu/lease-manager.ts.
+ */
+export function migrateGpuLeasesManuallyReleased(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(gpu_leases)").all() as Array<{ name: string }>;
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  if (!cols.some((c) => c.name === "manually_released")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN manually_released INTEGER NOT NULL DEFAULT 0");
   }
 }
 

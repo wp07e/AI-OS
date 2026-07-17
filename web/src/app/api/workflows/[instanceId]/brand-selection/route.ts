@@ -11,6 +11,7 @@ import {
   normalizeSelection,
 } from "@/lib/brand/selection";
 import { publicAssetUrl } from "@/lib/config";
+import { leaseManager } from "@/lib/gpu/lease-manager";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,8 +35,8 @@ export async function GET(
 
   const { instanceId } = await ctx.params;
   const instance = db()
-    .prepare("SELECT folder FROM workflow_instances WHERE id = ? AND user_id = ?")
-    .get(instanceId, user.id) as { folder: string } | undefined;
+    .prepare("SELECT folder, workflow_type FROM workflow_instances WHERE id = ? AND user_id = ?")
+    .get(instanceId, user.id) as { folder: string; workflow_type: string } | undefined;
   if (!instance) return new Response("not found", { status: 404 });
 
   const row = getContainerForUser(user.id);
@@ -63,8 +64,8 @@ export async function PUT(
 
   const { instanceId } = await ctx.params;
   const instance = db()
-    .prepare("SELECT folder FROM workflow_instances WHERE id = ? AND user_id = ?")
-    .get(instanceId, user.id) as { folder: string } | undefined;
+    .prepare("SELECT folder, workflow_type FROM workflow_instances WHERE id = ? AND user_id = ?")
+    .get(instanceId, user.id) as { folder: string; workflow_type: string } | undefined;
   if (!instance) return new Response("not found", { status: 404 });
 
   const row = getContainerForUser(user.id);
@@ -98,5 +99,14 @@ export async function PUT(
     `${instance.folder}/${SELECTION_FILENAME}`,
     JSON.stringify({ ...selection, resolvedAssetUrls }, null, 2) + "\n",
   );
+
+  // For Blender lanes: immediately push selected brand assets to the GPU
+  // instance so the agent can use them without waiting for re-provisioning.
+  // Best-effort — if no lease is active, assets will be pushed on next
+  // provisioning instead.
+  if (instance.workflow_type === "blender") {
+    void leaseManager().pushBrandAssets(instanceId).catch(() => {});
+  }
+
   return Response.json({ selection });
 }
