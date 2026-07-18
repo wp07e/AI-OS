@@ -221,16 +221,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # invoked as:
 #   uv run --project /app/blender python /app/blender/run.py <folder> --request request.json
 ENV BLENDER_PIPELINE_DIR=${APP_DIR}/blender
-COPY blender/pyproject.toml ${BLENDER_PIPELINE_DIR}/
+COPY blender/pyproject.toml blender/uv.lock ${BLENDER_PIPELINE_DIR}/
 COPY blender/*.py           ${BLENDER_PIPELINE_DIR}/
 # Pre-sync the venv at build time (same pattern as /app/video above) so
 # `uv run --project /app/blender` at runtime finds an existing .venv and does
 # NOT try to create one inside the read-only /app/blender. Without this, the
 # render route fails with "failed to create directory /app/blender/.venv:
-# Permission denied" and state.json hangs at "starting" forever.
+# Permission denied" and state.json hangs at "starting" forever. Uses
+# --frozen + the lockfile (uv.lock is copied above) to satisfy UV_FROZEN=1
+# set earlier in this file — matches the grok/layerre MCP bake blocks.
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd ${BLENDER_PIPELINE_DIR} \
- && uv sync --no-dev \
+ && uv sync --frozen --no-dev \
  && find ${BLENDER_PIPELINE_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # ─── Python on PATH ────────────────────────────────────────────────────────
