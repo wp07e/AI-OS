@@ -212,6 +212,15 @@ try:
     except Exception as e:
         print(f"blender-mcp: addon_enable failed: {e}", flush=True)
 
+    # Enable Poly Haven integration (free, no key). The addon gates its
+    # polyhaven tools behind a scene checkbox defaulting to False; enable it
+    # here so the agent can use search_polyhaven_assets / download_polyhaven_asset.
+    try:
+        bpy.context.scene.blendermcp_use_polyhaven = True  # type: ignore[attr-defined]
+        print("blender-mcp: enabled Poly Haven integration", flush=True)
+    except Exception as e:
+        print(f"blender-mcp: could not enable polyhaven prop: {e}", flush=True)
+
     # Start the socket server via the addon's operator.
     try:
         bpy.ops.blender_mcp.start_server()  # type: ignore[attr-defined]

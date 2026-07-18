@@ -95,6 +95,28 @@
         "XAI_API_KEY": "{env:XAI_API_KEY}"
       }
     },
+    // Vision MCP — free-tier OpenRouter Qwen2.5-VL via the LiteLLM gateway.
+    // Gives the text-only agent free image understanding for verifying renders
+    // (framing, blank output, detached parts). Falls back to grok vision when
+    // the free tier is rate-limited. Uses the same OPENAI_* creds as the main
+    // model (LiteLLM holds the central OpenRouter key).
+    "vision": {
+      "type": "local",
+      "command": [
+        "uv",
+        "--directory",
+        "/app/mcps/vision-mcp",
+        "run",
+        "python",
+        "main.py"
+      ],
+      "enabled": true,
+      "environment": {
+        "OPENAI_BASE_URL": "{env:OPENAI_BASE_URL}",
+        "OPENAI_API_KEY": "{env:OPENAI_API_KEY}",
+        "VISION_MODEL": "{env:VISION_MODEL}"
+      }
+    },
     // Sequential-thinking MCP — pure npx, no install step required.
     "sequentialthinking": {
       "type": "local",

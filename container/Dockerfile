@@ -125,6 +125,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
  && uv sync --frozen --no-dev \
  && find ${GROK_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} + \
  && chmod -R a+rX /opt/uv/python
+# ─── Vision MCP ─────────────────────────────────────────────────────────────
+# Free-tier vision MCP (OpenRouter Qwen2.5-VL via LiteLLM). Gives the text-only
+# agent a free way to verify Blender renders (framing, blank output, detached
+# parts). Same bake pattern as grok-mcp: venv synced in the runtime stage so
+# the recorded interpreter matches what uv reuses at launch. No uv.lock yet
+# (small dep set), so sync without --frozen.
+ENV VISION_MCP_DIR=${APP_DIR}/mcps/vision-mcp
+COPY mcps/vision-mcp/pyproject.toml ${VISION_MCP_DIR}/
+COPY mcps/vision-mcp/main.py ${VISION_MCP_DIR}/
+COPY mcps/vision-mcp/src/ ${VISION_MCP_DIR}/src/
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${VISION_MCP_DIR} \
+ && uv sync --no-dev \
+ && find ${VISION_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
+
 # Tell uv not to re-sync the baked venv at runtime — keeps it usable by the
 # non-root appuser without write access. NOTE: we deliberately do NOT set
 # UV_PROJECT_ENVIRONMENT globally: it would pin every `uv run` to one
@@ -208,8 +223,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV BLENDER_PIPELINE_DIR=${APP_DIR}/blender
 COPY blender/pyproject.toml ${BLENDER_PIPELINE_DIR}/
 COPY blender/*.py           ${BLENDER_PIPELINE_DIR}/
-RUN cd ${BLENDER_PIPELINE_DIR} \
- && find . -type d -name __pycache__ -prune -exec rm -rf {} +
+# Pre-sync the venv at build time (same pattern as /app/video above) so
+# `uv run --project /app/blender` at runtime finds an existing .venv and does
+# NOT try to create one inside the read-only /app/blender. Without this, the
+# render route fails with "failed to create directory /app/blender/.venv:
+# Permission denied" and state.json hangs at "starting" forever.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    cd ${BLENDER_PIPELINE_DIR} \
+ && uv sync --no-dev \
+ && find ${BLENDER_PIPELINE_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} +
 
 # ─── Python on PATH ────────────────────────────────────────────────────────
 # uv manages its own CPython under UV_PYTHON_INSTALL_DIR (/opt/uv/python).

@@ -94,14 +94,26 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
         />
 
         {/* Viewport preview */}
-        <div className="flex-1 flex items-center justify-center bg-black/40 rounded-lg border border-white/10 overflow-hidden min-h-0">
+        <div className="flex-1 flex items-center justify-center bg-black/40 rounded-lg border border-white/10 overflow-hidden min-h-0 relative">
           {latestRender ? (
-            <img
-              key={latestRender.path + version}
-              src={`/api/workspace/${instanceId}/file/${latestRender.path}?v=${version ?? ""}`}
-              alt={latestRender.label}
-              className="max-w-full max-h-full object-contain"
-            />
+            <>
+              <img
+                key={latestRender.path + version}
+                src={`/api/workspace/${instanceId}/file/${latestRender.path}?v=${version ?? ""}`}
+                alt={latestRender.label}
+                className="max-w-full max-h-full object-contain"
+              />
+              {/* Download the current render. Mirrors the video workflow's
+                  Download ↓ affordance (VideoStudio.tsx). */}
+              <a
+                href={`/api/workspace/${instanceId}/file/${latestRender.path}?v=${version ?? ""}`}
+                download
+                className="absolute right-3 top-3 rounded-lg border border-white/10 bg-black/60 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur transition hover:bg-black/80"
+                title="Download this render"
+              >
+                Download ↓
+              </a>
+            </>
           ) : (
             <EmptyState leaseReady={leaseReady} manuallyReleased={!!lease?.manually_released} busy={busy} phase={phase} />
           )}
@@ -114,10 +126,10 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
               <a
                 key={r.id}
                 href={`/api/workspace/${instanceId}/file/${r.path}?v=${version ?? r.createdAt}`}
-                target="_blank"
+                download
                 rel="noreferrer"
                 className="flex-shrink-0 w-20 h-20 rounded border border-white/10 overflow-hidden hover:border-white/30 transition-colors"
-                title={r.label}
+                title={`Download ${r.label}`}
               >
                 <img
                   src={`/api/workspace/${instanceId}/file/${r.thumbPath}?v=${version ?? r.createdAt}`}

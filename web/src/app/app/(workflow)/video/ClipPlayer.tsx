@@ -53,6 +53,15 @@ export function ClipPlayer({ instanceId, clip, version, onToggleInclude }: Props
           <Badge label={clip.continuity === "extend" ? "extended" : `from clip ${(clip.seedFromClip ?? 0) + 1}`} />
         )}
         {clip.duration != null && <span>{clip.duration}s</span>}
+        {/* Download this clip. Mirrors the final-video Download ↓ affordance. */}
+        <a
+          href={src}
+          download
+          className="ml-auto rounded-lg border border-white/10 bg-white/[0.03] px-2.5 py-1 text-[10px] font-semibold text-[var(--foreground)] transition hover:bg-white/[0.06]"
+          title="Download this clip"
+        >
+          Download ↓
+        </a>
         {onToggleInclude && (
           <button
             type="button"

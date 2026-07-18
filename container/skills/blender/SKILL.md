@@ -142,6 +142,26 @@ plane.data.materials.append(mat)
 If no assets are in `/root/assets/` (no brand was selected for this lane), tell
 the user to select brand assets via the Brand wizard.
 
+## Poly Haven assets (HDRIs, textures, models)
+
+Poly Haven is a library of free, high-quality 3D assets. It's **enabled by
+default** on every GPU instance (the addon checkbox `blendermcp_use_polyhaven`
+is turned on at startup) and needs **no API key**. Use the blender MCP tools
+directly:
+
+- `get_polyhaven_status` / `get_polyhaven_categories` — check it's on, browse categories.
+- `search_polyhaven_assets` — find assets by type (`hdris`, `textures`, `models`, `all`) and category.
+- `download_polyhaven_asset` — download an asset by id + type + resolution into the scene.
+- `set_texture` — apply a downloaded Poly Haven texture to an object.
+
+If `get_polyhaven_status` ever reports "disabled" (e.g. a scene was loaded that
+reset the checkbox), re-enable it yourself via `execute_code`:
+```python
+import bpy
+bpy.context.scene.blendermcp_use_polyhaven = True
+```
+then retry the polyhaven tool.
+
 ## Renders
 
 There are two kinds of renders:
@@ -156,6 +176,77 @@ There are two kinds of renders:
    full Cycles render at the chosen samples/resolution and appends to the
    renders gallery. You do NOT trigger this yourself unless the user explicitly
    asks via chat.
+
+### If a render is stuck at "starting"
+
+When the user clicks Render, the route writes `phase:"starting"`, then the
+script writes `bootstrapping`, then `rendering`, then `complete`. If
+`state.json` stays at `starting` for more than ~60 seconds with **no**
+`bootstrapping` transition, the launch itself failed (the script never started)
+— common cause: the pipeline venv / a permission error. Read the launch log:
+```
+<instance folder>/pipeline.log
+```
+(e.g. `/workspace/blends/<id>/pipeline.log`) — its tail will show the failure.
+Report the error to the user; do not retry the render in a loop. (The wrapper
+around the launch also writes `phase:"error"` with the log tail automatically,
+so you may already see it in `state.json`'s `errors[]`.)
+
+## Verify your work (before reporting a scene change as done)
+
+A scene can look "built" in the object list but be invisible in render — a
+0-vertex mesh from a failed edit, a camera pointing at the subject's back, a
+detached head, a blank preview. The low-res 16-sample feedback preview is too
+coarse to catch these. Before you tell the user a change is done, run two
+checks:
+
+1. **Higher-quality verification preview** — render a sharper EEVEE snapshot
+   specifically for verification (distinct from the quick feedback preview),
+   then save it as the preview so the canvas and the vision check both see it:
+   ```python
+   import bpy, os
+   scene = bpy.context.scene
+   scene.render.engine = 'BLENDER_EEVEE_NEXT'
+   scene.eeveee.taa_render_samples = 64      # higher quality for verification
+   scene.render.resolution_x = 1280          # larger, so small defects show
+   scene.render.resolution_y = 720
+   scene.render.image_settings.file_format = 'PNG'
+   os.makedirs('/root/blender/renders', exist_ok=True)
+   scene.render.filepath = '/root/blender/renders/preview.png'
+   bpy.ops.render.render(write_still=True)
+   ```
+   Then update `state.json` `renders[]` `samples` to 64 so the UI reflects it.
+
+2. **Vision check** — verify framing, blank output, and detached/misaligned
+   parts with the free vision MCP tool:
+   ```
+   vision.analyze_image(
+     prompt="Look at this 3D render. Is the subject fully formed and correctly "
+            "assembled (no detached/floating parts, no missing pieces)? Is the "
+            "camera pointing at the subject's intended front, not its back? Is "
+            "any region blank or solid-colored? Describe any defects.",
+     image_paths=["/workspace/blends/<id>/exports/preview.png"]
+   )
+   ```
+   The `vision` MCP uses a **free** OpenRouter Qwen2.5-VL model. If it errors
+   (free-tier rate limit / unavailability), fall back to the sharper paid check:
+   `grok.chat_with_vision(..., detail="high")`.
+
+3. **Mesh sanity** — confirm every mesh has geometry via `execute_code` (a
+   0-vertex mesh is corrupted and invisible in render):
+   ```python
+   import bpy
+   for o in bpy.data.objects:
+       if o.type == 'MESH':
+           v, f = len(o.data.vertices), len(o.data.polygons)
+           print(f"{o.name}: verts={v} faces={f}")
+           if v == 0: print(f"  ⚠ {o.name} has ZERO vertices — corrupted; rebuild it")
+   ```
+
+If any check fails, fix the scene before declaring success — do not report
+"done" on an unverified render. These checks catch exactly the failure modes
+(corrupted 0-vertex mesh, detached parts, camera facing the wrong way) that
+have burned sessions before.
 
 ## Translating user requests
 

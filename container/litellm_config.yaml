@@ -26,6 +26,15 @@ model_list:
       model: openrouter/deepseek/deepseek-v4-flash:nitro
       api_key: os.environ/OPENROUTER_API_KEY
 
+  # Free-tier multimodal vision model for the vision MCP (render verification).
+  # Used by container/mcps/vision-mcp to give the text-only agent free image
+  # understanding (framing, blank-output, detached-part checks). Free tiers can
+  # be rate-limited; callers fall back to grok.chat_with_vision when this errors.
+  - model_name: vision-free
+    litellm_params:
+      model: openrouter/qwen/qwen2.5-vl-32b-instruct:free
+      api_key: os.environ/OPENROUTER_API_KEY
+
   # Backup model kept for reference / future use. The free nemotron tier that
   # was the original default — uncomment and wire a `router_settings.fallbacks`
   # block (which requires a LiteLLM database_url) to enable automatic failover.

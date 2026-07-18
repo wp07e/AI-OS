@@ -259,6 +259,14 @@ def main() -> int:
 
     op = request.get("op", "")
     _CURRENT["op"] = op
+    # Write a bootstrapping phase immediately so the canvas/agent can tell the
+    # process actually started (vs. stuck at the route's "starting" patch from
+    # a launch that died before run.py ran, e.g. the .venv permission failure).
+    S.write_state(
+        folder,
+        "bootstrapping",
+        active={"op": op, "label": f"Preparing {op}…"},
+    )
     try:
         if op == "bootstrap":
             op_bootstrap(folder)

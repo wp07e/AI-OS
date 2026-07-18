@@ -114,19 +114,63 @@ __STATE_EOF__`;
   await execInContainer(row, ["bash", "-lc", stateWriteCmd], { user: "appuser" }).catch(() => {});
 
   // ── Launch the script (fire-and-forget) ──────────────────────────────────
+  // The script runs detached. Because it's backgrounded, the outer `bash -lc`
+  // returns 0 immediately — the route can't see the inner process's exit code.
+  // To avoid a silent hang (state.json stuck at "starting" forever when the
+  // launch itself fails, e.g. venv/permission errors that kill `uv run` before
+  // run.py ever writes state), we write a tiny wrapper script to the instance
+  // folder, then run it backgrounded. The wrapper runs the real command and,
+  // on non-zero exit, writes phase:"error" + the pipeline.log tail to
+  // state.json so the canvas and the agent both see the failure. (run.py
+  // writes its own errors on in-pipeline failures; this wrapper only fires for
+  // pre-run.py failures like the venv/permission case.)
   const script = "/app/blender/run.py";
   const logFile = `${instance.folder}/pipeline.log`;
-  const cmd = `cd /app/blender && nohup uv run --project /app/blender python ${script} '${instance.folder}' --request request.json > '${logFile}' 2>&1 &`;
+  const wrapperPath = `${instance.folder}/run_render.sh`;
+  const statePath = `${instance.folder}/state.json`;
+  // Heredoc-written wrapper avoids nested-quote escaping. `$@` passes the
+  // instance folder + request args through to run.py.
+  const wrapperWriteCmd = `cat > '${wrapperPath}' <<'__WRAPPER_EOF__'
+#!/usr/bin/env bash
+set -uo pipefail
+cd /app/blender
+uv run --project /app/blender python '${script}' '${instance.folder}' --request request.json >> '${logFile}' 2>&1
+rc=$?
+if [ $rc -ne 0 ]; then
+  python3 - '$statePath' '$logFile' <<'__PY_EOF__' || true
+import json, sys, datetime
+state_path, log_path = sys.argv[1], sys.argv[2]
+state = {}
+try:
+    with open(state_path) as f: state = json.load(f)
+except Exception: pass
+tail = ""
+try:
+    with open(log_path) as f: tail = "".join(f.readlines()[-15:])
+except Exception: pass
+errs = ["render launch failed (see pipeline.log)"]
+if tail.strip(): errs.append(tail.strip())
+state.update({"phase": "error", "lastUpdated": datetime.datetime.utcnow().isoformat(), "errors": errs, "active": None})
+with open(state_path, "w") as f: json.dump(state, f, indent=2)
+__PY_EOF__
+fi
+exit $rc
+__WRAPPER_EOF__
+chmod +x '${wrapperPath}'`;
+  await execInContainer(row, ["bash", "-lc", wrapperWriteCmd], { user: "appuser" });
+  // Background the wrapper (nohup + setsid so it survives the route returning).
+  const cmd = `nohup setsid bash '${wrapperPath}' > '${logFile}' 2>&1 &`;
   const r = await execInContainer(row, ["bash", "-lc", cmd], { user: "appuser" });
   if (r.code !== 0) {
-    // Reset state.json from "starting" → "error" so the canvas doesn't hang.
+    // The outer launch itself was rejected (rare — e.g. container not
+    // responding). Reset state.json from "starting" → "error" synchronously.
     const errorPatch = JSON.stringify({
       phase: "error",
       lastUpdated: new Date().toISOString(),
       errors: ["failed to launch render script"],
       active: null,
     });
-    const errorCmd = `python3 - <<'__STATE_EOF__'\nimport json\npath = ${JSON.stringify(instance.folder + "/state.json")}\nstate = {}\ntry:\n    with open(path) as f: state = json.load(f)\nexcept Exception: pass\nstate.update(${errorPatch})\nwith open(path, "w") as f: json.dump(state, f, indent=2)\n__STATE_EOF__`;
+    const errorCmd = `python3 - <<'__STATE_EOF__'\nimport json\npath = ${JSON.stringify(statePath)}\nstate = {}\ntry:\n    with open(path) as f: state = json.load(f)\nexcept Exception: pass\nstate.update(${errorPatch})\nwith open(path, "w") as f: json.dump(state, f, indent=2)\n__STATE_EOF__`;
     await execInContainer(row, ["bash", "-lc", errorCmd], { user: "appuser" }).catch(() => {});
     return NextResponse.json(
       { error: "failed to launch render", detail: r.stderr.trim() || `exit ${r.code}` },
