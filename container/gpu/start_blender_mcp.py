@@ -32,6 +32,19 @@ try:
     except Exception as e:
         print(f"blender-mcp: could not enable polyhaven prop: {e}", flush=True)
 
+    # Enable Sketchfab integration. Same gating pattern as Poly Haven: the
+    # addon registers its sketchfab tools (search/preview/download/status) only
+    # if this scene checkbox is True, and it defaults to False. The API key is
+    # delivered separately, as an env var (BLENDERMCP_SKETCHFAB_API_KEY) set on
+    # the GPU instance at vast.ai create-time by the lease manager — NOT stored
+    # in scene.blend (avoids leaking the token via syncDown). Wrapped
+    # defensively: older addon versions may not expose the prop.
+    try:
+        bpy.context.scene.blendermcp_use_sketchfab = True  # type: ignore[attr-defined]
+        print("blender-mcp: enabled Sketchfab integration", flush=True)
+    except Exception as e:
+        print(f"blender-mcp: could not enable sketchfab prop: {e}", flush=True)
+
     # Start the socket server via the addon's operator.
     try:
         bpy.ops.blender_mcp.start_server()  # type: ignore[attr-defined]

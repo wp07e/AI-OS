@@ -162,6 +162,42 @@ bpy.context.scene.blendermcp_use_polyhaven = True
 ```
 then retry the polyhaven tool.
 
+## Sketchfab models
+
+Sketchfab is a large library of user-uploaded 3D models (many free,
+downloadable). It's **enabled by default** on every GPU instance (the addon
+checkbox `blendermcp_use_sketchfab` is turned on at startup), and the API key is
+configured automatically by the host (no action from you). Use the blender MCP
+tools:
+
+- `get_sketchfab_status` — check that integration is on AND the API key is valid (it validates against `/v3/me`). Call this first if anything fails.
+- `search_sketchfab_models(query, categories?, count?, downloadable?)` — find models by text. Prefer `downloadable: true` (only those can be fetched). Returns a formatted list with UIDs.
+- `get_sketchfab_model_preview(uid)` — fetch the model's thumbnail so you can visually confirm it's the right model before downloading.
+- `download_sketchfab_model(uid, target_size)` — download the model AND import it into the scene in one step. **`target_size` is REQUIRED** and is the size in meters for the model's largest dimension (the model is scaled to fit). Pick a sensible value for the real-world object:
+
+  | Subject | target_size (m) |
+  |---|---|
+  | Small object (cup, phone, fruit) | 0.1 – 0.3 |
+  | Chair | 1.0 |
+  | Table | 0.75 |
+  | Person | 1.7 |
+  | Car | 4.5 |
+
+  Rescale afterward via `execute_code` (`bpy.context.scene.objects['<name>'].scale = ...`) if needed.
+
+If `get_sketchfab_status` reports "disabled" on a resumed session (the checkbox
+is serialized into scene.blend and a pre-fix blend may carry False), re-enable
+it yourself via `execute_code`:
+```python
+import bpy
+bpy.context.scene.blendermcp_use_sketchfab = True
+```
+then retry. (The host also re-asserts this on resume, but this is the safety net.)
+
+If `get_sketchfab_status` reports the key as missing/invalid, that's a host
+configuration issue (the `SKETCHFAB_API_KEY` env var) — tell the user, don't
+retry downloads in a loop.
+
 ## Renders
 
 There are two kinds of renders:
@@ -255,6 +291,7 @@ have burned sessions before.
 | "Add a red cube" | `create_object` (cube) → `set_material` (red) → save → **preview render** → update state.json |
 | "Make it metallic" | `execute_code`: set metallic/roughness → save → **preview render** |
 | "Load a Poly Haven HDRI" | `search_polyhaven_assets` (hdris) → `download_polyhaven_asset` → **preview render** |
+| "Add a Sketchfab model" (e.g. a chair) | `get_sketchfab_status` → `search_sketchfab_models` ("chair", downloadable=true) → `get_sketchfab_model_preview` (confirm) → `download_sketchfab_model(uid, target_size=1.0)` → save → **preview render** |
 | "Apply my brand logo to the box" | `execute_code`: list `/root/assets/`, `bpy.data.images.load('/root/assets/<logo>')`, create texture material → assign to object → **preview render** |
 | "Render it" (final quality) | Tell the user to click the Render button (or run the script with `op:"render"` if they insist) |
 | "What does it look like?" | `get_render` → describe what you see, or show the latest preview |

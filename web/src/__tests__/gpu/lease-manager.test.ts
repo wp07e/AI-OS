@@ -242,6 +242,69 @@ describe("lease manager: acquire", () => {
   });
 });
 
+describe("lease manager: Sketchfab API key plumbing", () => {
+  it("passes BLENDERMCP_SKETCHFAB_API_KEY to createInstance when SKETCHFAB_API_KEY is set", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    const saved = process.env.SKETCHFAB_API_KEY;
+    process.env.SKETCHFAB_API_KEY = "tok_123";
+
+    try {
+      await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+      const call = vast.mocks.createInstance.mock.calls[0][0] as { env?: Record<string, string> };
+      // Renamed at pass-through so the addon's expected env var reaches the GPU.
+      expect(call.env).toMatchObject({
+        BLENDERMCP_SKETCHFAB_API_KEY: "tok_123",
+        GPU_SSH_PUBKEY: expect.any(String),
+      });
+    } finally {
+      if (saved === undefined) delete process.env.SKETCHFAB_API_KEY;
+      else process.env.SKETCHFAB_API_KEY = saved;
+    }
+  });
+
+  it("omits the Sketchfab var entirely when SKETCHFAB_API_KEY is unset", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    const saved = process.env.SKETCHFAB_API_KEY;
+    delete process.env.SKETCHFAB_API_KEY;
+
+    try {
+      await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+      const call = vast.mocks.createInstance.mock.calls[0][0] as { env?: Record<string, string> };
+      expect(call.env).toHaveProperty("GPU_SSH_PUBKEY");
+      expect(call.env).not.toHaveProperty("BLENDERMCP_SKETCHFAB_API_KEY");
+    } finally {
+      if (saved === undefined) delete process.env.SKETCHFAB_API_KEY;
+      else process.env.SKETCHFAB_API_KEY = saved;
+    }
+  });
+
+  it("re-asserts the sketchfab checkbox (alongside polyhaven) on resume", async () => {
+    // The prop is serialized into scene.blend; a resumed pre-fix blend carries
+    // False. The resume re-assert sets both polyhaven AND sketchfab checkboxes
+    // over the socket, so the agent's sketchfab tools work after a resume.
+    const vast = mockVast();
+    const exec = mockExec();
+    const mgr = createLeaseManager({ vast, exec, fileOps: mockFileOps() });
+    // A resume .blend exists so the full resume path (push + re-assert) runs.
+    exec.setFile("/workspace/blends/inst-1/scene.blend", true);
+
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: true });
+
+    const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const reassert = calls.find((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return (
+        cmd[0] === "bash" &&
+        cmd[2]?.includes("blendermcp_use_polyhaven") &&
+        cmd[2]?.includes("blendermcp_use_sketchfab")
+      );
+    });
+    expect(reassert).toBeDefined();
+  });
+});
+
 describe("lease manager: release", () => {
   it("destroys the instance even if sync throws (storage fees never accrue)", async () => {
     const vast = mockVast();

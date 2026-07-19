@@ -362,7 +362,18 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
       diskGb,
       onstart,
       label: `blender-${lease.instance_id.slice(0, 8)}`,
-      env: { GPU_SSH_PUBKEY: pubKey },
+      env: {
+        GPU_SSH_PUBKEY: pubKey,
+        // Sketchfab: the blender-mcp addon reads BLENDERMCP_SKETCHFAB_API_KEY
+        // from env (its 3rd-level key fallback). Renamed at pass-through so the
+        // user's SKETCHFAB_API_KEY in web/.env reaches the addon's expected var
+        // on the GPU instance. Env-var only — never written into scene.blend, so
+        // the key can't leak via syncDown. Omitted entirely when unset (so users
+        // who don't configure Sketchfab see no empty var on the instance).
+        ...(process.env.SKETCHFAB_API_KEY
+          ? { BLENDERMCP_SKETCHFAB_API_KEY: process.env.SKETCHFAB_API_KEY }
+          : {}),
+      },
     });
     const cur1 = getLease(lease.instance_id) ?? lease;
     upsertLease({ ...cur1, state: "provisioning", vast_id: vastId, gpu_name: offer.gpu_name, dph: offer.dph_total, acquired_at: now() });
@@ -427,6 +438,27 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
 
       const cur3 = getLease(lease.instance_id) ?? lease;
       upsertLease({ ...cur3, state: "ready", last_activity: now(), last_error: null });
+
+      // On a resume, the pushed scene.blend was saved by a prior session and
+      // carries its serialized blendermcp_use_polyhaven / blendermcp_use_sketchfab
+      // values. Blends saved before the startup-enable fix carry False, so the
+      // agent's polyhaven/sketchfab tools come back "disabled" until re-enabled.
+      // Re-assert both props on the resumed scene now that the socket is up,
+      // and re-save so the corrected values persist. Best-effort: wrapped to
+      // never block provisioning on a re-enable failure. (The Sketchfab API key
+      // is NOT set here — it's delivered as an env var at create-time, so it
+      // never lands in scene.blend.)
+      if (resume) {
+        await exec(
+          container,
+          [
+            "bash",
+            "-lc",
+            `echo '{"type":"execute_code","params":{"code":"import bpy; bpy.context.scene.blendermcp_use_polyhaven = True; bpy.context.scene.blendermcp_use_sketchfab = True; bpy.ops.wm.save_as_mainfile(filepath=\\\\\\"/root/blender/scene.blend\\\\\\")"}}' | timeout 10 nc -q1 127.0.0.1 ${BLENDER_PORT} 2>/dev/null || true`,
+          ],
+          { user: APP_USER },
+        ).catch(() => {});
+      }
     } catch (e) {
       // Provisioning failed after the instance was created — destroy it so it
       // doesn't keep billing as an orphan. The caller will move the lease to

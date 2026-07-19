@@ -221,6 +221,15 @@ try:
     except Exception as e:
         print(f"blender-mcp: could not enable polyhaven prop: {e}", flush=True)
 
+    # Enable Sketchfab integration. Same gating pattern: the addon registers its
+    # sketchfab tools only if this checkbox is True (defaults False). The API
+    # key is delivered as env var BLENDERMCP_SKETCHFAB_API_KEY at create-time.
+    try:
+        bpy.context.scene.blendermcp_use_sketchfab = True  # type: ignore[attr-defined]
+        print("blender-mcp: enabled Sketchfab integration", flush=True)
+    except Exception as e:
+        print(f"blender-mcp: could not enable sketchfab prop: {e}", flush=True)
+
     # Start the socket server via the addon's operator.
     try:
         bpy.ops.blender_mcp.start_server()  # type: ignore[attr-defined]
