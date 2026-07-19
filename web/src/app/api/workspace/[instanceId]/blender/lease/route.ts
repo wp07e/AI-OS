@@ -95,7 +95,6 @@ export async function POST(
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   const { instanceId } = await ctx.params;
   const body = await req.json().catch(() => ({}));
-  const resume = body.resume !== false; // default true
 
   const resolved = await resolveInstance(instanceId, user.id);
   if ("error" in resolved) return resolved.error;
@@ -103,6 +102,16 @@ export async function POST(
   // Bump last_activity on every status check (lane is being viewed).
   leaseManager().touch(instanceId);
 
+  // {action:"retry"} — force an immediate queue-pump probe for this one
+  // queued lease (the "Retry now" button), bypassing the 20s pump cadence.
+  // Distinct from the default acquire path so we don't re-run the full
+  // acquire flow on a lease that already has a row.
+  if (body.action === "retry") {
+    await leaseManager().retryQueued(instanceId);
+    return NextResponse.json({ lease: leaseManager().get(instanceId) });
+  }
+
+  const resume = body.resume !== false; // default true
   const lease = await leaseManager().acquire({
     instanceId,
     userId: user.id,

@@ -32,10 +32,17 @@ export interface LeaseInfo {
   ssh_host?: string | null;
   ssh_port?: number | null;
   queue_position?: number | null;
+  /** ms epoch of the last queue-pump market-search attempt (success or failure). */
+  queue_last_checked_at?: number | null;
+  /** null when the last market search succeeded (even if empty); set when the
+   *  vastai CLI/auth/network threw. Distinct from last_error (which covers
+   *  provisioning errors like "no qualifying GPU offers under cap"). */
+  queue_search_error?: string | null;
   acquired_at?: number | null;
   last_activity?: number;
   last_synced_at?: number | null;
-  /** Last error message (e.g. "vastai CLI not found", "no offers under cap"). */
+  /** Last error message (e.g. "vastai CLI not found", "no offers under cap",
+   *  or the queue-timeout message). */
   last_error?: string | null;
   /**
    * 1 when the user explicitly released the GPU. While set, the frontend does

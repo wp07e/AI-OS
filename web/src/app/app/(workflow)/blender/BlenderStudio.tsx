@@ -80,6 +80,18 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
     refreshLease();
   };
 
+  // "Retry now" while queued: force an immediate market probe for this lane
+  // (bypassing the 20s queue-pump cadence) so the user isn't stuck waiting on
+  // the next tick when they can see the market may have changed.
+  const handleRetryQueued = async () => {
+    await fetch(`/api/workspace/${instanceId}/blender/lease`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "retry" }),
+    });
+    refreshLease();
+  };
+
   return (
     <div className="flex h-full">
       {/* ── Main area: pill + viewport + gallery ─────────────────────────── */}
@@ -91,6 +103,7 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
           pendingRelease={isReleasingPending}
           onRelease={handleRelease}
           onAcquire={handleAcquire}
+          onRetry={handleRetryQueued}
         />
 
         {/* Viewport preview */}

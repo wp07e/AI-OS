@@ -69,7 +69,7 @@ CREATED_KEY=1
 echo "   Key ID: $SSH_KEY_ID"
 
 # ── 3. Search for an offer ──────────────────────────────────────────────────
-log "3. Searching for GPU offers under \$0.09/hr..."
+log "3. Searching for GPU offers under \$0.15/hr..."
 # Search each allowed GPU model separately (vastai doesn't support OR'd gpu_name)
 BEST_OFFER=""
 BEST_DPH=999
@@ -77,7 +77,7 @@ for GPU in "RTX_4060" "RTX_4060_Ti" "RTX_5060" "RTX_5060_Ti" "RTX_A4000"; do
   # Determine CUDA floor
   CUDA_FLOOR=12
   if [[ "$GPU" == "RTX_5060" || "$GPU" == "RTX_5060_Ti" ]]; then CUDA_FLOOR=12.8; fi
-  QUERY="gpu_name=${GPU} dph_total<=0.09 cuda_max_good>=${CUDA_FLOOR} verified=true"
+  QUERY="gpu_name=${GPU} dph_total<=0.15 cuda_max_good>=${CUDA_FLOOR} verified=true"
   if [ "${DEBUG:-0}" = "1" ]; then echo "   Query: $QUERY"; fi
   OFFERS=$(vastai search offers "$QUERY" -t on_demand --order 'dlperf_per_dphtotal-' --limit 1 --raw 2>/dev/null) || continue
   OFFER_ID=$(echo "$OFFERS" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print(d[0]['id'] if d else '')" 2>/dev/null) || continue

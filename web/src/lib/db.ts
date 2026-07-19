@@ -29,6 +29,7 @@ function openDb(): Database.Database {
   migrateAdminColumn(conn);
   migrateGpuLeasesLastError(conn);
   migrateGpuLeasesManuallyReleased(conn);
+  migrateGpuLeasesQueueDiagnostics(conn);
   seedDefaultUser(conn);
   _db = conn;
   return conn;
@@ -147,6 +148,8 @@ function migrate(conn: Database.Database) {
       ssh_key_id    INTEGER,          -- vast.ai SSH key id (cleaned up on release)
       queue_position INTEGER,         -- 0-based position when state=queued
       queue_requested_at INTEGER,     -- ms epoch, for FIFO ordering
+      queue_last_checked_at INTEGER,  -- ms epoch of the last queue-pump search attempt (success or failure)
+      queue_search_error TEXT,        -- null when the last market search succeeded; set to the error string when vastai/CLI/auth failed (distinct from a genuinely empty market)
       acquired_at   INTEGER,          -- ms epoch, when provisioning started
       last_activity INTEGER NOT NULL, -- ms epoch, bumped on every poll/render
       last_synced_at INTEGER,         -- ms epoch of the last successful .blend sync-down
@@ -182,6 +185,27 @@ export function migrateGpuLeasesManuallyReleased(conn: Database.Database): void 
   if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
   if (!cols.some((c) => c.name === "manually_released")) {
     conn.exec("ALTER TABLE gpu_leases ADD COLUMN manually_released INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+/**
+ * Add queue diagnostics to pre-existing gpu_leases tables (idempotent).
+ *
+ * `queue_last_checked_at` records the last queue-pump market-search attempt
+ * (success or failure), so the UI can show "still trying — last checked Ns
+ * ago" instead of a frozen state. `queue_search_error` is null when the search
+ * SUCCEEDED (even if empty) and set to the error string when the vastai
+ * CLI/auth/network threw — this distinguishes a broken search from a genuinely
+ * empty market, which `.catch(() => [])` previously conflated.
+ */
+export function migrateGpuLeasesQueueDiagnostics(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(gpu_leases)").all() as Array<{ name: string }>;
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  if (!cols.some((c) => c.name === "queue_last_checked_at")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN queue_last_checked_at INTEGER");
+  }
+  if (!cols.some((c) => c.name === "queue_search_error")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN queue_search_error TEXT");
   }
 }
 

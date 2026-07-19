@@ -42,7 +42,11 @@ import {
   vast as defaultVast,
   type VastClient,
 } from "./vast";
-import type { LeaseState } from "./types";
+import type { LeaseState, Offer } from "./types";
+
+/** Default max ms a lease may stay queued before giving up (10 minutes).
+ *  Overridable via GPU_QUEUE_TIMEOUT_MS env in production. */
+const DEFAULT_QUEUE_TIMEOUT_MS = Number(process.env.GPU_QUEUE_TIMEOUT_MS ?? 600_000);
 
 // ── DB row type (mirrors the gpu_leases table) ──────────────────────────────
 
@@ -59,6 +63,13 @@ export interface LeaseRow {
   ssh_key_id: number | null;
   queue_position: number | null;
   queue_requested_at: number | null;
+  /** ms epoch of the last queue-pump market-search attempt (success or failure). */
+  queue_last_checked_at: number | null;
+  /** null when the last market search succeeded (even if empty); set to the
+   *  error string when the vastai CLI/auth/network threw. Distinguishes a
+   *  broken search from a genuinely empty market (previously conflated by
+   *  `.catch(() => [])` in the queue pump). */
+  queue_search_error: string | null;
   acquired_at: number | null;
   last_activity: number;
   last_synced_at: number | null;
@@ -104,6 +115,12 @@ export interface LeaseManagerConfig {
   watchdogIntervalMs?: number; // default 10s
   syncIntervalMs?: number; // default 5s
   queuePumpIntervalMs?: number; // default 20s
+  /** Max ms a lease may stay queued before giving up (default 600000 = 10 min).
+   *  Set via GPU_QUEUE_TIMEOUT_MS env in production. Once exceeded the lease
+   *  moves to destroyed + manually_released=1 so the "Acquire GPU" button
+   *  reappears with a clear timeout message (instead of retrying invisibly
+   *  forever, which previously looked like a frozen UI). */
+  queueTimeoutMs?: number;
   idleReaperIntervalMs?: number; // default max(idleTimeoutMs/4, 30s)
   gpuImage?: string;
   diskGb?: number;
@@ -181,16 +198,20 @@ function upsertLease(row: LeaseRow): void {
     .prepare(
       `INSERT INTO gpu_leases
          (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, ssh_key_id,
-          queue_position, queue_requested_at, acquired_at, last_activity, last_synced_at, last_error,
+          queue_position, queue_requested_at, queue_last_checked_at, queue_search_error,
+          acquired_at, last_activity, last_synced_at, last_error,
           manually_released)
        VALUES (@instance_id, @user_id, @state, @vast_id, @gpu_name, @dph, @ssh_host, @ssh_port, @ssh_key_id,
-          @queue_position, @queue_requested_at, @acquired_at, @last_activity, @last_synced_at, @last_error,
+          @queue_position, @queue_requested_at, @queue_last_checked_at, @queue_search_error,
+          @acquired_at, @last_activity, @last_synced_at, @last_error,
           @manually_released)
        ON CONFLICT(instance_id) DO UPDATE SET
          state=excluded.state, vast_id=excluded.vast_id, gpu_name=excluded.gpu_name,
          dph=excluded.dph, ssh_host=excluded.ssh_host, ssh_port=excluded.ssh_port,
          ssh_key_id=excluded.ssh_key_id,
          queue_position=excluded.queue_position, acquired_at=excluded.acquired_at,
+         queue_last_checked_at=excluded.queue_last_checked_at,
+         queue_search_error=excluded.queue_search_error,
          last_activity=excluded.last_activity, last_synced_at=excluded.last_synced_at,
          last_error=excluded.last_error`,
     )
@@ -273,6 +294,15 @@ export interface LeaseManager {
   /** Get the current lease row for an instance (or null). */
   get(instanceId: string): LeaseRow | null;
 
+  /**
+   * Force an immediate queue-pump attempt for ONE queued lease (the "Retry
+   * now" button), bypassing the 20s pump cadence. If a sub-cap offer is
+   * available the lease is provisioned; otherwise it stays queued with its
+   * diagnostic fields refreshed. No-op (resolves cleanly) when the lease is
+   * absent or not in the queued state.
+   */
+  retryQueued(instanceId: string): Promise<void>;
+
   /** Start the background loops (watchdog, sync, queue pump, idle reaper). */
   start(): void;
   /** Stop the background loops (for graceful shutdown / tests). */
@@ -295,6 +325,7 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
   const watchdogIntervalMs = config.watchdogIntervalMs ?? 10_000;
   const syncIntervalMs = config.syncIntervalMs ?? 5_000;
   const queuePumpIntervalMs = config.queuePumpIntervalMs ?? 20_000;
+  const queueTimeoutMs = config.queueTimeoutMs ?? DEFAULT_QUEUE_TIMEOUT_MS;
   const idleReaperIntervalMs = config.idleReaperIntervalMs ?? Math.max(idleTimeoutMs / 4, 30_000);
   const gpuImage = config.gpuImage ?? DEFAULT_GPU_IMAGE;
   const diskGb = config.diskGb ?? DEFAULT_DISK_GB;
@@ -770,6 +801,8 @@ __STATE_EOF__`;
       ssh_key_id: null,
       queue_position: null,
       queue_requested_at: null,
+      queue_last_checked_at: null,
+      queue_search_error: null,
       acquired_at: now(),
       last_activity: now(),
       last_synced_at: null,
@@ -1281,13 +1314,104 @@ __STATE_EOF__`;
 
   // ── Queue pump ────────────────────────────────────────────────────────────
 
+  /**
+   * Run ONE queue-pump market search and stamp the diagnostic fields on every
+   * queued lease (success OR failure). Returns the offers (empty array on
+   * failure — the failure is recorded in queue_search_error, distinct from a
+   * genuinely empty market).
+   *
+   * Extracted from queuePumpTick so retryQueued can reuse exactly the same
+   * search + diagnostic logic for a single lease without waiting for the 20s
+   * pump cadence.
+   */
+  async function probeQueueOffers(): Promise<{ ok: true; offers: Offer[] } | { ok: false; error: string }> {
+    try {
+      const offers = await vast.searchOffers({ limit: 1 });
+      return { ok: true, offers };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message };
+    }
+  }
+
+  /** Stamp queue_last_checked_at (always) and queue_search_error (on failure)
+   *  on every currently-queued lease. Called after each probe. */
+  function stampQueueDiagnostics(result: { ok: true } | { ok: false; error: string }): void {
+    const ts = now();
+    const errMsg = result.ok ? null : result.error;
+    const rows = queuedLeases();
+    for (const l of rows) {
+      // Only write when something changed — avoids needless DB churn every 20s
+      // in the steady state where the market keeps returning empty cleanly.
+      if (l.queue_last_checked_at !== ts || l.queue_search_error !== errMsg) {
+        upsertLease({ ...l, queue_last_checked_at: ts, queue_search_error: errMsg });
+      }
+    }
+  }
+
+  /**
+   * If a queued lease has been waiting longer than queueTimeoutMs, give up:
+   * move it to destroyed + manually_released=1 with a clear timeout message.
+   * Reusing the "explicit release" terminal state means the existing Acquire
+   * path (which clears manually_released) and the frontend "Acquire GPU"
+   * button (shown for destroyed) both work with no new state or UI — the user
+   * just sees the timeout message and a button to retry.
+   *
+   * Returns true if any lease was timed out (so the caller can skip further
+   * work on that tick).
+   */
+  function reapExpiredQueued(nowMs: number): boolean {
+    const queue = queuedLeases();
+    if (queue.length === 0) return false;
+    let reaped = false;
+    for (const l of queue) {
+      const requestedAt = l.queue_requested_at ?? l.acquired_at ?? nowMs;
+      if (nowMs - requestedAt <= queueTimeoutMs) continue;
+      const minutes = Math.round(queueTimeoutMs / 60_000);
+      console.warn(
+        `[queue-pump] lease ${l.instance_id} timed out after ${minutes}min in queue; moving to destroyed`,
+      );
+      // upsertLease intentionally does NOT update manually_released (it's
+      // reserved for the explicit setManuallyReleased setter so ordinary state
+      // transitions can't clobber it). Set the row fields first, then the flag.
+      upsertLease({
+        ...l,
+        state: "destroyed",
+        vast_id: null,
+        queue_position: null,
+        last_error: `Timed out waiting for an affordable GPU (${minutes} min). Click Acquire GPU to retry.`,
+      });
+      // manually_released=1 suppresses auto-reacquire (watchdog reProvision +
+      // frontend lane-open effect) until the user explicitly clicks Acquire.
+      setManuallyReleased(l.instance_id, 1);
+      reaped = true;
+    }
+    if (reaped) reindexQueue();
+    return reaped;
+  }
+
   async function queuePumpTick(): Promise<void> {
     const queue = queuedLeases();
     if (queue.length === 0) return;
-    // Re-search to confirm a sub-cap offer exists before granting.
-    const offers = await vast.searchOffers({ limit: 1 }).catch(() => []);
-    if (offers.length === 0) return; // still no affordable offer
-    const next = queue[0];
+
+    // 1. Give up on leases that have waited past the timeout. Do this BEFORE
+    //    the market probe so a permanently-unavailable market doesn't keep a
+    //    lease queued forever (the original bug: invisible retries for 30 min).
+    if (reapExpiredQueued(now())) {
+      // If the head of the queue was reaped, the remaining queue may be empty
+      // or reordered — re-read rather than operating on a stale snapshot.
+      if (queuedLeases().length === 0) return;
+    }
+
+    // 2. Probe the market. Record the outcome on EVERY queued lease so the UI
+    //    can distinguish "still trying, market empty" from "search itself is
+    //    broken" — previously .catch(() => []) conflated these, hiding CLI/auth
+    //    failures behind a permanent "no qualifying GPU offers under cap".
+    const result = await probeQueueOffers();
+    stampQueueDiagnostics(result);
+    if (!result.ok || result.offers.length === 0) return; // still no affordable offer
+
+    // 3. Grant the head of the queue.
+    const next = queuedLeases()[0];
     const container = db()
       .prepare("SELECT * FROM containers WHERE user_id = ?")
       .get(next.user_id) as ContainerRow | undefined;
@@ -1304,9 +1428,55 @@ __STATE_EOF__`;
     await withLock(next.instance_id, () => provisionInstance(getLease(next.instance_id)!, container, true)).catch((e) => {
       const msg = (e as Error).message;
       console.error(`[queue-pump] provision failed for ${next.instance_id}:`, msg);
-      upsertLease({ ...next, state: "queued", queue_requested_at: now(), last_error: msg });
+      const cur = getLease(next.instance_id) ?? next;
+      upsertLease({ ...cur, state: "queued", vast_id: null, queue_requested_at: now(), last_error: msg });
     });
     // Re-index remaining queue positions.
+    reindexQueue();
+  }
+
+  /**
+   * Force an immediate queue-pump attempt for a single queued lease (the
+   * "Retry now" button). Runs the same probe → grant path as queuePumpTick
+   * but scoped to `instanceId`, without waiting for the 20s cadence. No-op if
+   * the lease is absent or not queued.
+   */
+  async function retryQueuedImpl(instanceId: string): Promise<void> {
+    const lease = getLease(instanceId);
+    if (!lease || lease.state !== "queued") {
+      // Nothing to retry. Don't throw — the frontend calls this optimistically
+      // and a stale row shouldn't surface as an error.
+      return;
+    }
+    const container = db()
+      .prepare("SELECT * FROM containers WHERE user_id = ?")
+      .get(lease.user_id) as ContainerRow | undefined;
+    if (!container) return;
+
+    // Probe + stamp diagnostics for this one lease (mirrors queuePumpTick).
+    const result = await probeQueueOffers();
+    const ts = now();
+    const errMsg = result.ok ? null : result.error;
+    const pre = getLease(instanceId) ?? lease;
+    const stamped: LeaseRow = { ...pre, queue_last_checked_at: ts, queue_search_error: errMsg };
+    upsertLease(stamped);
+    if (!result.ok || result.offers.length === 0) return;
+
+    // An offer exists — try to provision this lease directly. Bypass the FIFO
+    // head-of-queue ordering: the user explicitly asked to retry THIS lane.
+    // NOTE: no inner withLock — retryQueued (the public method) already wraps
+    // this in withLock(instanceId, …), and withLock is non-reentrant; a nested
+    // lock on the same key would deadlock.
+    const promoted = claimConcurrencySlot({ ...stamped, queue_position: null }, maxConcurrent);
+    if (!promoted) return;
+    try {
+      await provisionInstance(getLease(instanceId) ?? stamped, container, true);
+    } catch (e) {
+      const msg = (e as Error).message;
+      console.error(`[retry-queued] provision failed for ${instanceId}:`, msg);
+      const cur = getLease(instanceId) ?? stamped;
+      upsertLease({ ...cur, state: "queued", vast_id: null, queue_requested_at: now(), last_error: msg });
+    }
     reindexQueue();
   }
 
@@ -1434,6 +1604,7 @@ __STATE_EOF__`;
       db().prepare("UPDATE gpu_leases SET last_activity = ? WHERE instance_id = ?").run(now(), instanceId);
     },
     get: getLease,
+    retryQueued: (instanceId) => withLock(instanceId, () => retryQueuedImpl(instanceId)),
     start() {
       timers.push(setInterval(() => void watchdogTick(), watchdogIntervalMs));
       timers.push(setInterval(() => void syncTick(), syncIntervalMs));

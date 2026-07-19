@@ -519,28 +519,221 @@ describe("lease manager: queue pump", () => {
   });
 });
 
+// ── Queue pump diagnostics + timeout (issue: "stuck on Waiting for GPU") ────
+//
+// The queue pump used to swallow searchOffer errors via .catch(() => []),
+// making a broken vastai CLI / bad key / rate limit indistinguishable from a
+// genuinely empty market — and retrying invisibly forever with no UI signal.
+// These tests pin the new behavior: the pump records what happened on each
+// tick (last_checked_at + search_error), gives up after queueTimeoutMs, and
+// exposes retryQueued for the "Retry now" button.
+
+describe("lease manager: queue pump diagnostics", () => {
+  it("records queue_search_error when searchOffers throws (broken CLI/auth)", async () => {
+    const vast = mockVast({
+      searchOffers: vi.fn(async () => {
+        throw new Error("vastai: unauthorized (HTTP 401)");
+      }),
+    });
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      maxConcurrent: 1,
+      queuePumpIntervalMs: 50,
+    });
+    // Seed a queued lease (skip the acquire path; we want to isolate the pump).
+    seedLease({
+      instance_id: "inst-1",
+      state: "queued",
+      queue_position: 0,
+      vast_id: null,
+    });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 120));
+    mgr.stop();
+
+    const after = mgr.get("inst-1");
+    expect(after?.state).toBe("queued"); // not promoted — search failed
+    expect(after?.queue_search_error).toContain("unauthorized");
+    expect(after?.queue_last_checked_at).not.toBeNull();
+    // last_error is NOT clobbered by a search failure (it's the *provision*
+    // error channel). queue_search_error is the distinct *search* channel.
+  });
+
+  it("clears queue_search_error and stamps last_checked when the search succeeds (even if empty)", async () => {
+    const vast = mockVast({
+      searchOffers: vi.fn(async () => []), // genuine empty market
+    });
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      maxConcurrent: 1,
+      queuePumpIntervalMs: 50,
+    });
+    // Seed a queued lease that previously had a search error.
+    seedLease({
+      instance_id: "inst-1",
+      state: "queued",
+      queue_position: 0,
+      vast_id: null,
+      last_error: "no qualifying GPU offers under cap",
+    });
+    db()
+      .prepare("UPDATE gpu_leases SET queue_search_error = ? WHERE instance_id = ?")
+      .run("stale prior error", "inst-1");
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 120));
+    mgr.stop();
+
+    const after = mgr.get("inst-1");
+    expect(after?.state).toBe("queued"); // still queued — market genuinely empty
+    expect(after?.queue_search_error).toBeNull(); // cleared: search succeeded
+    expect(after?.queue_last_checked_at).not.toBeNull();
+    expect(after?.last_error).toBe("no qualifying GPU offers under cap"); // untouched
+  });
+});
+
+describe("lease manager: queue timeout", () => {
+  it("transitions a queued lease to destroyed + manually_released after queueTimeoutMs", async () => {
+    const vast = mockVast({
+      searchOffers: vi.fn(async () => []), // never any offer
+    });
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      maxConcurrent: 1,
+      queuePumpIntervalMs: 40,
+      queueTimeoutMs: 80, // very short for the test
+    });
+    // Seed a queued lease whose queue_requested_at is already past the timeout.
+    seedLease({
+      instance_id: "inst-1",
+      state: "queued",
+      queue_position: 0,
+      vast_id: null,
+    });
+    db()
+      .prepare("UPDATE gpu_leases SET queue_requested_at = ? WHERE instance_id = ?")
+      .run(Date.now() - 1000, "inst-1"); // 1s ago, well past the 80ms timeout
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 150));
+    mgr.stop();
+
+    const after = mgr.get("inst-1");
+    expect(after?.state).toBe("destroyed");
+    expect(after?.manually_released).toBe(1); // so auto-reacquire stays suppressed
+    expect(after?.last_error).toMatch(/timed out/i);
+    // The lease was NOT provisioned.
+    expect(vast.mocks.createInstance).not.toHaveBeenCalled();
+  });
+
+  it("does NOT time out a recently-queued lease", async () => {
+    const vast = mockVast({
+      searchOffers: vi.fn(async () => []),
+    });
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      queuePumpIntervalMs: 40,
+      queueTimeoutMs: 5_000, // 5s — the lease (just queued) is well within
+    });
+    seedLease({
+      instance_id: "inst-1",
+      state: "queued",
+      queue_position: 0,
+      vast_id: null,
+    });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 150));
+    mgr.stop();
+
+    const after = mgr.get("inst-1");
+    expect(after?.state).toBe("queued"); // still trying
+    expect(after?.manually_released).toBe(0);
+  });
+});
+
+describe("lease manager: retryQueued", () => {
+  it("forces an immediate provision attempt for a queued lease when an offer exists", async () => {
+    const vast = mockVast(); // default: returns a fakeOffer
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      maxConcurrent: 1,
+      // NOTE: start() NOT called — retryQueued must work without the pump loop.
+    });
+    seedLease({
+      instance_id: "inst-1",
+      state: "queued",
+      queue_position: 0,
+      vast_id: null,
+    });
+
+    await mgr.retryQueued("inst-1");
+
+    const after = mgr.get("inst-1");
+    expect(after?.state).toBe("ready");
+    expect(vast.mocks.createInstance).toHaveBeenCalledTimes(1);
+    // The diagnostic fields are stamped by the retry path too.
+    expect(after?.queue_last_checked_at).not.toBeNull();
+    expect(after?.queue_search_error).toBeNull();
+  });
+
+  it("is a no-op when the lease is not queued (e.g. already ready)", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    seedLease({ instance_id: "inst-1", state: "ready", vast_id: 500 });
+
+    await mgr.retryQueued("inst-1").catch(() => {});
+    // No new instance created — the ready lease is untouched.
+    expect(vast.mocks.createInstance).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op when no lease row exists", async () => {
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    // No seed — nothing to retry.
+    await mgr.retryQueued("inst-1").catch(() => {});
+    expect(vast.mocks.createInstance).not.toHaveBeenCalled();
+  });
+});
+
 // ── New behavior: manually_released flag + release state machine ───────────
 
-/** Insert a lease row directly (used to script watchdog scenarios). */
+/** Insert a lease row directly (used to script watchdog/queue scenarios). */
 function seedLease(over: Partial<{
   instance_id: string;
   user_id: number;
   state: string;
-  vast_id: number;
-  ssh_host: string;
-  ssh_port: number;
+  vast_id: number | null;
+  ssh_host: string | null;
+  ssh_port: number | null;
   last_activity: number;
   acquired_at: number;
   manually_released: number;
+  queue_position: number | null;
+  queue_requested_at: number | null;
+  last_error: string | null;
 }> = {}): void {
   db()
     .prepare(
       `INSERT INTO gpu_leases
          (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port,
-          ssh_key_id, queue_position, queue_requested_at, acquired_at, last_activity,
+          ssh_key_id, queue_position, queue_requested_at, queue_last_checked_at,
+          queue_search_error, acquired_at, last_activity,
           last_synced_at, last_error, manually_released)
        VALUES (@instance_id, @user_id, @state, @vast_id, 'RTX 4060', 0.07, @ssh_host, @ssh_port,
-          NULL, NULL, NULL, @acquired_at, @last_activity, NULL, NULL, @manually_released)`,
+          NULL, @queue_position, @queue_requested_at, NULL, NULL,
+          @acquired_at, @last_activity, NULL, @last_error, @manually_released)`,
     )
     .run({
       instance_id: "inst-1",
@@ -552,6 +745,9 @@ function seedLease(over: Partial<{
       last_activity: Date.now(),
       acquired_at: Date.now(),
       manually_released: 0,
+      queue_position: null,
+      queue_requested_at: null,
+      last_error: null,
       ...over,
     });
 }

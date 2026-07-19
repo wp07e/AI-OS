@@ -50,6 +50,79 @@ describe("LeasePill", () => {
     expect(screen.getByText("#2 in queue")).toBeDefined(); // 0-based → display #2
   });
 
+  // ── Queue diagnostics + escape hatch (issue: "stuck on Waiting for GPU") ──
+
+  it("shows 'last checked Ns ago' while queued so the user can see it's still trying", () => {
+    const lease: LeaseInfo = {
+      instance_id: "x",
+      state: "queued",
+      queue_position: 0,
+      queue_last_checked_at: Date.now() - 25_000, // 25s ago
+    };
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    expect(screen.getByText(/last checked/i)).toBeDefined();
+    expect(screen.getByText(/25s ago/i)).toBeDefined();
+  });
+
+  it("renders Retry and Cancel buttons while queued", () => {
+    const onRetry = vi.fn(async () => {});
+    const onRelease = vi.fn(async () => {});
+    const lease: LeaseInfo = { instance_id: "x", state: "queued", queue_position: 0 };
+    render(<LeasePill lease={lease} loaded onRelease={onRelease} onAcquire={vi.fn()} onRetry={onRetry} />);
+    expect(screen.getByText(/retry/i)).toBeDefined();
+    expect(screen.getByText(/cancel/i)).toBeDefined();
+  });
+
+  it("calls onRetry when Retry is clicked", () => {
+    const onRetry = vi.fn(async () => {});
+    const lease: LeaseInfo = { instance_id: "x", state: "queued", queue_position: 0 };
+    render(
+      <LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} onRetry={onRetry} />,
+    );
+    fireEvent.click(screen.getByText(/retry/i));
+    expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("calls onRelease when Cancel is clicked while queued", () => {
+    const onRelease = vi.fn(async () => {});
+    const lease: LeaseInfo = { instance_id: "x", state: "queued", queue_position: 0 };
+    render(
+      <LeasePill lease={lease} loaded onRelease={onRelease} onAcquire={vi.fn()} onRetry={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByText(/cancel/i));
+    expect(onRelease).toHaveBeenCalledOnce();
+  });
+
+  it("surfaces a distinct 'search failed' message when queue_search_error is set (vs a genuinely empty market)", () => {
+    const lease: LeaseInfo = {
+      instance_id: "x",
+      state: "queued",
+      queue_position: 0,
+      queue_search_error: "vastai: unauthorized (HTTP 401)",
+      last_error: "no qualifying GPU offers under cap",
+    };
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    // The search-failure message is the actionable one — it must be shown.
+    expect(screen.getByText(/search failed/i)).toBeDefined();
+    expect(screen.getByText(/unauthorized/i)).toBeDefined();
+    // The generic 'no qualifying offers' must NOT also be shown (it would be
+    // misleading — the real problem is the broken search, not the market).
+    expect(screen.queryByText(/no qualifying GPU offers under cap/i)).toBeNull();
+  });
+
+  it("shows the generic 'no qualifying offers' message when the search succeeded but found nothing", () => {
+    const lease: LeaseInfo = {
+      instance_id: "x",
+      state: "queued",
+      queue_position: 0,
+      queue_search_error: null, // search succeeded
+      last_error: "no qualifying GPU offers under cap",
+    };
+    render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
+    expect(screen.getByText(/no qualifying GPU offers under cap/i)).toBeDefined();
+    expect(screen.queryByText(/search failed/i)).toBeNull();
+  });
+
   it("renders ready state with GPU + cost and a Release button", () => {
     const lease: LeaseInfo = {
       instance_id: "x",

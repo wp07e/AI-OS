@@ -17,6 +17,7 @@ export function LeasePill({
   pendingRelease,
   onRelease,
   onAcquire,
+  onRetry,
 }: {
   lease: LeaseInfo | null;
   bootLogs?: string;
@@ -24,9 +25,13 @@ export function LeasePill({
   pendingRelease?: boolean;
   onRelease: () => void;
   onAcquire: () => void;
+  /** Force an immediate queue-pump retry for a queued lease ("Retry now").
+   *  Optional — when omitted the Retry button is hidden. */
+  onRetry?: () => Promise<void>;
 }) {
   const [releasing, setReleasing] = useState(false);
   const [acquiring, setAcquiring] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const state = lease?.state ?? "none";
 
   const handleRelease = async () => {
@@ -47,6 +52,16 @@ export function LeasePill({
     }
   };
 
+  const handleRetry = async () => {
+    if (!onRetry) return;
+    setRetrying(true);
+    try {
+      await onRetry();
+    } finally {
+      setRetrying(false);
+    }
+  };
+
   // While the first poll hasn't resolved (e.g. on a lane remount), render a
   // neutral loading pill with NO action buttons. This prevents the "Acquire GPU"
   // button from flashing when lease is momentarily null even though the GPU is
@@ -64,13 +79,24 @@ export function LeasePill({
   }
 
   const { label, color, detail } = describeLease(lease);
-  const error = lease?.last_error;
+  // While queued, a search FAILURE (broken vastai CLI / bad key / rate limit)
+  // is the actionable signal and must be shown INSTEAD of the generic
+  // "no qualifying offers" message — they were previously conflated by the
+  // backend's `.catch(() => [])`, hiding broken searches behind a permanent
+  // "empty market" message. queue_search_error is null when the search
+  // succeeded (even if empty); only then do we fall back to last_error.
+  const error = lease?.queue_search_error
+    ? `GPU marketplace search failed: ${lease.queue_search_error}`
+    : lease?.last_error;
   // Show the boot panel (spinner or logs) whenever the lease is booting —
   // bootLogs may be undefined until the instance's container exists.
   const isBooting = state === "provisioning" || state === "recovering";
   // Show "Acquire GPU" only when there's no active lease. After a manual release
   // the server sets state="destroyed", which is covered here.
   const canAcquire = state === "none" || state === "destroyed";
+  // While queued the user has no native escape hatch (the pump retries every
+  // 20s invisibly). Offer Retry (force an immediate probe) + Cancel (release).
+  const canRetryQueued = state === "queued";
   // A manual release is in flight (pendingRelease, backed by sessionStorage so
   // it survives lane remounts) AND the polled state hasn't reached terminal yet.
   // In this window the server row may briefly still read `ready` (before the
@@ -112,6 +138,33 @@ export function LeasePill({
             {acquiring ? "Acquiring…" : "Acquire GPU"}
           </button>
         )}
+        {/* Queued escape hatch: Retry (force an immediate probe now, bypassing
+            the 20s pump cadence) + Cancel (tear down the lease so the user can
+            re-acquire later). The backend queue pump retries invisibly every
+            20s; without these buttons a long wait looks frozen (issue: "stuck
+            on Waiting for GPU / no qualifying GPU offers under cap"). */}
+        {canRetryQueued && !releasePending && (
+          <div className="ml-auto flex items-center gap-3">
+            {onRetry && (
+              <button
+                onClick={handleRetry}
+                disabled={retrying}
+                className="text-xs text-emerald-400/80 hover:text-emerald-300 transition-colors disabled:opacity-40"
+                title="Search the GPU market again right now (don't wait for the next 20s tick)."
+              >
+                {retrying ? "Retrying…" : "Retry"}
+              </button>
+            )}
+            <button
+              onClick={handleRelease}
+              disabled={releasing}
+              className="text-xs text-white/50 hover:text-white/80 transition-colors disabled:opacity-40"
+              title="Stop waiting and cancel this GPU request."
+            >
+              {releasing ? "Cancelling…" : "Cancel"}
+            </button>
+          </div>
+        )}
       </div>
       {isBooting && (
         <div className="mt-1 px-3 py-1.5 rounded bg-black/40 border border-white/5 overflow-x-auto max-h-32 overflow-y-auto">
@@ -149,7 +202,15 @@ function describeLease(lease: LeaseInfo | null): {
       return {
         label: "Waiting for GPU",
         color: "bg-amber-400 animate-pulse",
-        detail: lease.queue_position != null ? `#${lease.queue_position + 1} in queue` : undefined,
+        // "#N in queue" + "last checked Ns ago" so the user can SEE the pump is
+        // still trying (it retries every 20s but previously updated no row
+        // fields, so the UI looked frozen for the whole wait).
+        detail: [
+          lease.queue_position != null ? `#${lease.queue_position + 1} in queue` : null,
+          formatLastChecked(lease.queue_last_checked_at),
+        ]
+          .filter(Boolean)
+          .join(" • ") || undefined,
       };
     case "provisioning":
       return {
@@ -178,4 +239,18 @@ function describeLease(lease: LeaseInfo | null): {
     default:
       return { label: "GPU", color: "bg-white/30" };
   }
+}
+
+/**
+ * Format the queue-pump's last market-search timestamp as a relative "Ns ago"
+ * string. Returns null when there's no timestamp yet (the first tick hasn't
+ * run) so the caller can omit it. Recomputed on every 5s frontend poll, so it
+ * stays fresh without a separate timer.
+ */
+function formatLastChecked(checkedAt: number | null | undefined): string | null {
+  if (!checkedAt) return null;
+  const secs = Math.max(0, Math.round((Date.now() - checkedAt) / 1000));
+  if (secs < 60) return `last checked ${secs}s ago`;
+  const mins = Math.round(secs / 60);
+  return `last checked ${mins}m ago`;
 }
