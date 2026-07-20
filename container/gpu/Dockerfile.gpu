@@ -80,8 +80,11 @@ RUN BLENDER_PY=$(find "$BLENDER_INSTALL_DIR" -name "python3.*" -path "*/python/b
 # ── 4. blender-mcp addon ─────────────────────────────────────────────────────
 # Install the addon as a single file in the Blender addons directory, matching
 # onstart.sh section 5. The addon is a self-contained single file with its own
-# bl_info, register(), and unregister(). We fetch from GitHub at a pinned ref.
-ARG BLENDER_MCP_REF=main
+# bl_info, register(), and unregister(). Fetched from the wp07e fork pinned to a
+# SHA (the fork carries the viewport-screenshot bytes-over-socket fix on
+# fix/viewport-bytes). Set BLENDER_MCP_REF=fix/viewport-bytes to track the
+# branch HEAD instead; raw.githubusercontent accepts branch names directly.
+ARG BLENDER_MCP_REF=5519e5550023dc2f3ecacd2df1baee92e143777f
 ENV ADDON_REF=${BLENDER_MCP_REF}
 
 RUN BLENDER_MAJOR="${BLENDER_VERSION%%.*}" && \
@@ -91,11 +94,11 @@ RUN BLENDER_MAJOR="${BLENDER_VERSION%%.*}" && \
     mkdir -p "$ADDONS_DIR" && \
     REF="${BLENDER_MCP_REF}" && \
     if [ "$REF" = "main" ]; then \
-      REF=$(curl -fsSL "https://api.github.com/repos/ahujasid/blender-mcp/commits/main" \
+      REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
         | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
     fi && \
     echo "blender-mcp addon ref: $REF" && \
-    curl -fsSL "https://raw.githubusercontent.com/ahujasid/blender-mcp/${REF}/addon.py" \
+    curl -fsSL "https://raw.githubusercontent.com/wp07e/blender-mcp/${REF}/addon.py" \
       -o "$ADDONS_DIR/blender_mcp.py"
 
 # ── 5. Blender startup script ────────────────────────────────────────────────

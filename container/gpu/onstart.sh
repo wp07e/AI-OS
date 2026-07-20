@@ -19,8 +19,9 @@ set -euo pipefail
 LOG=/root/onstart.log
 BLENDER_PORT="${BLENDER_PORT:-9876}"
 ADDON_SRC="${ADDON_SRC:-/app/gpu/addon.py}"
-# The addon ref to download if the baked copy isn't present. Defaults to `main`.
-ADDON_REF="${BLENDER_MCP_REF:-main}"
+# The addon ref to download if the baked copy isn't present. Defaults to the
+# wp07e fork's fix/viewport-bytes SHA (set via BLENDER_MCP_REF in the GPU image).
+ADDON_REF="${BLENDER_MCP_REF:-5519e5550023dc2f3ecacd2df1baee92e143777f}"
 # Blender version to install. Defaults to a pinned recent release. Set to a
 # specific version (e.g. "4.5.11") or "latest-4.5" to auto-resolve.
 BLENDER_VERSION="${BLENDER_VERSION:-4.5.11}"
@@ -160,10 +161,10 @@ if [ ! -f "$ADDONS_DIR/blender_mcp.py" ]; then
     log "addon not at $ADDON_SRC; downloading from GitHub..."
     REF="$ADDON_REF"
     if [ "$REF" = "main" ]; then
-      REF=$(curl -fsSL "https://api.github.com/repos/ahujasid/blender-mcp/commits/main" \
+      REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
         | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/') || true
     fi
-    curl -fsSL "https://raw.githubusercontent.com/ahujasid/blender-mcp/${REF}/addon.py" \
+    curl -fsSL "https://raw.githubusercontent.com/wp07e/blender-mcp/${REF}/addon.py" \
       -o "$ADDONS_DIR/blender_mcp.py" || {
       log "FATAL: could not fetch blender-mcp addon"
       exit 1

@@ -189,14 +189,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #                            each GPU instance by the onstart script.
 #   2. /app/gpu/onstart.sh — the vast.ai --onstart bootstrap script.
 #
-# Versioning: the blender-mcp GitHub repo has NO version tags, so addon.py is
-# fetched from the `main` branch HEAD at build time (auto-updates on each build,
-# matching how OPENCODE_VERSION=latest works below). To pin for reproducibility,
-# pass --build-arg BLENDER_MCP_REF=<commit-sha>. The PyPI package (the MCP
-# server the agent talks to) is resolved to the latest release by default; pin
-# with --build-arg BLENDER_MCP_VERSION=<x.y.z>. Keep the two roughly in sync.
-ARG BLENDER_MCP_REF=main
-ARG BLENDER_MCP_VERSION=latest
+# Versioning: we use the wp07e fork of blender-mcp
+# (https://github.com/wp07e/blender-mcp) which carries the viewport-screenshot
+# bytes-over-socket fix on the fix/viewport-bytes branch. The fork's addon.py is
+# fetched at build time; the MCP server (blender_mcp package) is installed from
+# the same fork via `uvx --from git+...` so both sides of the fix stay in sync.
+# Pin to a SHA for reproducibility (the default below); set
+# BLENDER_MCP_REF=fix/viewport-bytes to track the branch HEAD instead (raw.gh
+# accepts branch names directly, so the SHA-resolution branch below is only an
+# optimization for cache stability, not a correctness requirement).
+ARG BLENDER_MCP_REF=5519e5550023dc2f3ecacd2df1baee92e143777f
 # The Blender version the GPU onstart script downloads (NOT apt — apt only has
 # 3.0.1 on Ubuntu 22.04). Downloaded from blender.org at instance boot time.
 # Set to "latest-4.5" to auto-resolve, or pin to a specific version like "4.5.11".
@@ -209,26 +211,45 @@ ENV GPU_DIR=${APP_DIR}/gpu
 RUN mkdir -p ${GPU_DIR} \
  && REF="${BLENDER_MCP_REF}" \
  && if [ "$REF" = "main" ]; then \
-      REF=$(curl -fsSL "https://api.github.com/repos/ahujasid/blender-mcp/commits/main" \
+      REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
         | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
     fi \
  && echo "blender-mcp addon ref: $REF" \
- && curl -fsSL "https://raw.githubusercontent.com/ahujasid/blender-mcp/${REF}/addon.py" \
+ && curl -fsSL "https://raw.githubusercontent.com/wp07e/blender-mcp/${REF}/addon.py" \
       -o ${GPU_DIR}/addon.py
 COPY gpu/onstart.sh ${GPU_DIR}/onstart.sh
 COPY gpu/onstart-baked.sh ${GPU_DIR}/onstart-baked.sh
 RUN chmod +x ${GPU_DIR}/onstart.sh ${GPU_DIR}/onstart-baked.sh
-# Pre-warm the blender-mcp MCP tool so the agent's first tool call isn't slow.
-# `uvx blender-mcp` resolves the package into the uv cache; the actual MCP
-# server process is started by opencode on demand via the opencode.jsonc entry.
-# BLENDER_MCP_VERSION=latest picks up the newest release automatically (matches
-# the mcp-remote@latest / opencode-ai@latest convention used elsewhere).
+# Bake the blender-mcp MCP server into a venv (same pattern as grok/layerre
+# above) so OpenCode starts it instantly — no `uvx` cold build at runtime. The
+# fork (BLENDER_MCP_REF above) carries the viewport-screenshot bytes-over-socket
+# fix; baking the venv here means both sides of the fix are present with zero
+# runtime network access. OpenCode launches it via `uv run` (see
+# opencode.jsonc), which reuses this venv — UV_FROZEN=1 (set earlier) prevents
+# any re-sync. Previously this used `uvx --from git+...` which built from source
+# on every cold start (~55s); that exceeded OpenCode's MCP init timeout and the
+# blender tools were never registered.
+#
+# Unlike grok/layerre (which run `uv run python main.py` and never touch
+# egg-info), blender-mcp is a console script — `uv run blender-mcp` triggers
+# setuptools to update the egg-info timestamps at runtime. The venv is built as
+# root here, but OpenCode runs as the non-root appuser (dynamic UID materialized
+# by entrypoint.sh). chmod a+rwX so appuser can write the egg-info; entrypoint.sh
+# deliberately never chowns /app, so we fix permissions at build time instead.
+ENV BLENDER_MCP_DIR=${APP_DIR}/mcps/blender-mcp
 RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "${BLENDER_MCP_VERSION}" = "latest" ]; then \
-      uvx blender-mcp --help >/dev/null 2>&1 || true; \
-    else \
-      uvx --from "blender-mcp==${BLENDER_MCP_VERSION}" blender-mcp --help >/dev/null 2>&1 || true; \
-    fi
+    REF="${BLENDER_MCP_REF}" \
+ && if [ "$REF" = "main" ]; then \
+      REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
+        | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
+    fi \
+ && mkdir -p ${BLENDER_MCP_DIR} \
+ && curl -fsSL "https://github.com/wp07e/blender-mcp/archive/${REF}.tar.gz" \
+    | tar xz --strip-components=1 -C ${BLENDER_MCP_DIR} \
+ && cd ${BLENDER_MCP_DIR} \
+ && uv sync --frozen --no-dev \
+ && find ${BLENDER_MCP_DIR}/.venv -type d -name __pycache__ -prune -exec rm -rf {} + \
+ && chmod -R a+rwX ${BLENDER_MCP_DIR}
 # Deterministic Blender helper pipeline (lease bootstrap, artifact sync, headless
 # batch render). The agent's interactive scene work goes through the blender MCP
 # tools directly; this script owns only the non-agent-safe ops. run.py is

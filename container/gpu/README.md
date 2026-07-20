@@ -13,11 +13,13 @@ runs on a separate vast.ai instance reached over an SSH tunnel (see
   Blender with the add-on's socket server bound to `0.0.0.0:9876`, and writes a
   readiness sentinel (`/root/.blender-mcp-ready`) when the socket is listening.
   Idempotent — safe to re-run on restart.
-- **`addon.py`** — the [blender-mcp](https://github.com/ahujasid/blender-mcp)
-  Blender add-on (pinned version), baked into the OpenCode container image at
-  `/app/gpu/addon.py` at build time, then scp'd onto each GPU instance by the
-  lease manager and imported by `onstart.sh`. (Downloaded during the image build
-  in the Dockerfile — Part 2.1.)
+- **`addon.py`** — the [blender-mcp fork](https://github.com/wp07e/blender-mcp)
+  Blender add-on (pinned to the `fix/viewport-bytes` SHA on the wp07e fork, which
+  returns viewport screenshots as base64 over the socket so the MCP server can
+  decode them without a shared filesystem), baked into the OpenCode container
+  image at `/app/gpu/addon.py` at build time, then scp'd onto each GPU instance
+  by the lease manager and imported by `onstart.sh`. (Downloaded during the image
+  build in the Dockerfile — Part 2.1.)
 
 ## Network topology
 

@@ -160,11 +160,22 @@
     // interpret as "GPU not ready — provisioning is automatic."
     "blender": {
       "type": "local",
-      "command": ["uvx", "blender-mcp"],
+      // Run from the baked venv (same pattern as grok/layerre) — no `uvx` cold
+      // build at runtime, so the MCP server starts instantly and OpenCode's
+      // init handshake doesn't time out. The venv is pre-synced in the image at
+      // /app/mcps/blender-mcp from the wp07e fork (BLENDER_MCP_REF in
+      // container/Dockerfile), which carries the viewport-screenshot
+      // bytes-over-socket fix that matches the addon on the GPU instance.
+      "command": ["uv", "--directory", "/app/mcps/blender-mcp", "run", "blender-mcp"],
       "enabled": true,
       "environment": {
         "BLENDER_HOST": "127.0.0.1",
-        "BLENDER_PORT": "9876"
+        "BLENDER_PORT": "9876",
+        // When set, get_viewport_screenshot saves the PNG to this dir and
+        // returns the file path as text (instead of an Image the text-only
+        // model can't display). The agent can copy the file to the active
+        // instance's exports/ for canvas display.
+        "BLENDER_SCREENSHOT_DIR": "/workspace/exports"
       },
       "timeout": 120000
     }
