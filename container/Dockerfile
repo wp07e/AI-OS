@@ -43,8 +43,11 @@ FROM node:${NODE_VERSION}-slim AS runtime
 
 # Re-install the slim set of OS tools we need at runtime.
 # openssh-client: required for the Blender workflow's GPU SSH tunnel (the host
-#   lease manager execs `ssh -NfL 9876:...` inside this container to reach the
-#   blender-mcp socket on the remote GPU instance). See web/src/lib/gpu/.
+#   lease manager execs `autossh -M 0 -f -N -L 9876:...` inside this container
+#   to reach the blender-mcp socket on the remote GPU instance).
+# autossh: supervises the tunnel — auto-restarts on death and uses SSH
+#   keepalives for reliable failure detection, replacing the hand-rolled
+#   watchdog kill+restart cycle that flapped every 10s. See web/src/lib/gpu/.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
@@ -57,6 +60,7 @@ RUN apt-get update \
       iproute2 \
       ffmpeg \
       openssh-client \
+      autossh \
  && rm -rf /var/lib/apt/lists/*
 
 # uv — Python package runner used to launch the Grok MCP. The installer ships

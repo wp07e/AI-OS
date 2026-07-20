@@ -95,8 +95,9 @@ function mockVast(overrides: Partial<VastClient> = {}): VastClient & {
 }
 
 /** A mock container exec that simulates the SSH key flow + tunnel probes. */
-function mockExec(): ContainerExec & { responses: Record<string, string>; setFile: (path: string, exists: boolean) => void } {
+function mockExec(): ContainerExec & { responses: Record<string, string>; setFile: (path: string, exists: boolean) => void; setTunnelAlive: (alive: boolean) => void } {
   const files = new Map<string, boolean>();
+  let tunnelAlive = true;
   const responses: Record<string, string> = {
     "/app/gpu/onstart.sh": "#!/bin/bash\nexit 0\n",
     "/app/gpu/onstart-baked.sh": "#!/bin/bash\nexit 0\n",
@@ -126,11 +127,21 @@ function mockExec(): ContainerExec & { responses: Record<string, string>; setFil
     if (bashCmd.includes("blender-mcp-ready")) {
       return { code: 0, stdout: "", stderr: "" };
     }
-    // nc probe of the local tunnel
-    if (bashCmd.includes("nc -z 127.0.0.1")) {
-      return { code: 0, stdout: "ok\n", stderr: "" };
+    // autossh tunnel start (startTunnel) — mock success.
+    if (bashCmd.includes("autossh")) {
+      return { code: 0, stdout: "", stderr: "" };
     }
-    // All other bash commands (scp, ssh mkdir, tunnel start, etc.) succeed.
+    // pkill of autossh/ssh tunnel (stopTunnel) — mock success.
+    if (bashCmd.includes("pkill")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    // nc probe of the local tunnel — respects setTunnelAlive().
+    if (bashCmd.includes("nc -z 127.0.0.1")) {
+      return tunnelAlive
+        ? { code: 0, stdout: "ok\n", stderr: "" }
+        : { code: 1, stdout: "dead\n", stderr: "" };
+    }
+    // All other bash commands (scp, ssh mkdir, etc.) succeed.
     if (cmd[0] === "bash") return { code: 0, stdout: "", stderr: "" };
     // Handle `cat <path>` for onstart script.
     if (cmd[0] === "cat" && cmd[1]) {
@@ -147,6 +158,7 @@ function mockExec(): ContainerExec & { responses: Record<string, string>; setFil
   return Object.assign(fn, {
     responses,
     setFile: (path: string, exists: boolean) => files.set(path, exists),
+    setTunnelAlive: (alive: boolean) => { tunnelAlive = alive; },
   });
 }
 
@@ -835,6 +847,123 @@ describe("lease manager: atomic concurrency reservation", () => {
     expect(created).toBe(1);
     const states = [mgr.get("inst-1")?.state, mgr.get("inst-2")?.state].sort();
     expect(states).toEqual(["queued", "ready"]);
+  });
+});
+
+// ── SSH tunnel: autossh + probe retry ───────────────────────────────────────
+
+describe("lease manager: SSH tunnel (autossh)", () => {
+  it("startTunnel uses autossh -M 0 with ExitOnForwardFailure and ConnectTimeout", async () => {
+    const vast = mockVast();
+    const exec = mockExec();
+    const mgr = createLeaseManager({ vast, exec, fileOps: mockFileOps() });
+
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+
+    const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    // Find the startTunnel exec call — it contains `autossh -M 0`.
+    const tunnelStart = calls.find((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return cmd[0] === "bash" && cmd[2]?.includes("autossh");
+    });
+    expect(tunnelStart).toBeDefined();
+    const tunnelCmd = (tunnelStart![1] as string[])[2];
+    // Core autossh flags.
+    expect(tunnelCmd).toContain("autossh -M 0 -f -N");
+    expect(tunnelCmd).toContain("AUTOSSH_GATETIME=0");
+    // SSH options that make startup failures visible + reliable death detection.
+    expect(tunnelCmd).toContain("ExitOnForwardFailure=yes");
+    expect(tunnelCmd).toContain("ConnectTimeout=10");
+    expect(tunnelCmd).toContain("ServerAliveInterval=10");
+    // The old swallowed-error pattern must be gone.
+    expect(tunnelCmd).not.toContain("2>/dev/null || true");
+  });
+
+  it("stopTunnel kills autossh by pattern (not the old ssh -NfL pattern alone)", async () => {
+    const vast = mockVast();
+    const exec = mockExec();
+    const mgr = createLeaseManager({ vast, exec, fileOps: mockFileOps() });
+
+    await mgr.acquire({ instanceId: "inst-1", userId: 1, container: fakeContainer(), resume: false });
+    await mgr.release("inst-1", "idle-timeout");
+
+    const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    const stopCmd = calls.find((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return cmd[0] === "bash" && cmd[2]?.includes("pkill") && cmd[2]?.includes("autossh");
+    });
+    expect(stopCmd).toBeDefined();
+    const cmdStr = (stopCmd![1] as string[])[2];
+    // Kills autossh and also the orphaned ssh child as belt-and-suspenders.
+    expect(cmdStr).toContain('pkill -f "autossh.*9876:"');
+  });
+});
+
+describe("lease manager: watchdog tunnel probe retry", () => {
+  it("does NOT restart when the tunnel probe succeeds (alive)", async () => {
+    const vast = mockVast();
+    const exec = mockExec();
+    const mgr = createLeaseManager({
+      vast,
+      exec,
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      syncIntervalMs: 60_000, // don't let sync interfere
+      idleReaperIntervalMs: 60_000,
+    });
+    // Tunnel is alive (default). Seed a ready lease so the watchdog checks it.
+    seedLease({ state: "ready", manually_released: 0, vast_id: 500 });
+
+    mgr.start();
+    await new Promise((r) => setTimeout(r, 200));
+    mgr.stop();
+
+    const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    // No stopTunnel (pkill) should have been called — the tunnel is alive.
+    const killCall = calls.find((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return cmd[0] === "bash" && cmd[2]?.includes("pkill");
+    });
+    expect(killCall).toBeUndefined();
+  });
+
+  it("restarts autossh after 3 consecutive probe failures (dead tunnel)", async () => {
+    const vast = mockVast();
+    const exec = mockExec();
+    // Make the tunnel probe fail every time.
+    exec.setTunnelAlive(false);
+    const mgr = createLeaseManager({
+      vast,
+      exec,
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      syncIntervalMs: 60_000, // don't let sync interfere
+      idleReaperIntervalMs: 60_000,
+    });
+    seedLease({ state: "ready", manually_released: 0, vast_id: 500 });
+
+    mgr.start();
+    // The probe retry does 3 attempts with 1s delays (~2s total) before
+    // declaring dead. Wait long enough for one full probe cycle + restart.
+    await new Promise((r) => setTimeout(r, 4000));
+    mgr.stop();
+    // Drain any in-flight tick so it can't touch the next test's seeded row.
+    await new Promise((r) => setTimeout(r, 30));
+
+    const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
+    // stopTunnel (pkill autossh) was called — the watchdog restarted the tunnel.
+    const killCall = calls.find((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return cmd[0] === "bash" && cmd[2]?.includes("pkill") && cmd[2]?.includes("autossh");
+    });
+    expect(killCall).toBeDefined();
+    // startTunnel (autossh) was called — at least once from the restart
+    // (acquire didn't run, so the only autossh call is from the watchdog restart).
+    const autosshCalls = calls.filter((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return cmd[0] === "bash" && cmd[2]?.includes("autossh");
+    });
+    expect(autosshCalls.length).toBeGreaterThanOrEqual(1);
   });
 });
 

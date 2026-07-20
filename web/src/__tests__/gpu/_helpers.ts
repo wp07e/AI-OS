@@ -137,8 +137,10 @@ export function mockVast(overrides: Partial<VastClient> = {}): VastClient & {
 export function mockExec(): ContainerExec & {
   responses: Record<string, string>;
   setFile: (path: string, exists: boolean) => void;
+  setTunnelAlive: (alive: boolean) => void;
 } {
   const files = new Map<string, boolean>();
+  let tunnelAlive = true;
   const responses: Record<string, string> = {
     "/app/gpu/onstart.sh": "#!/bin/bash\nexit 0\n",
     "/app/gpu/onstart-baked.sh": "#!/bin/bash\nexit 0\n",
@@ -163,8 +165,19 @@ export function mockExec(): ContainerExec & {
     if (bashCmd.includes("blender-mcp-ready")) {
       return { code: 0, stdout: "", stderr: "" };
     }
+    // autossh tunnel start (startTunnel) — mock success.
+    if (bashCmd.includes("autossh")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    // pkill of autossh/ssh tunnel (stopTunnel) — mock success.
+    if (bashCmd.includes("pkill")) {
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    // nc probe of the local tunnel — respects setTunnelAlive().
     if (bashCmd.includes("nc -z 127.0.0.1")) {
-      return { code: 0, stdout: "ok\n", stderr: "" };
+      return tunnelAlive
+        ? { code: 0, stdout: "ok\n", stderr: "" }
+        : { code: 1, stdout: "dead\n", stderr: "" };
     }
     if (cmd[0] === "bash") return { code: 0, stdout: "", stderr: "" };
     if (cmd[0] === "cat" && cmd[1]) {
@@ -179,6 +192,7 @@ export function mockExec(): ContainerExec & {
   return Object.assign(fn, {
     responses,
     setFile: (path: string, exists: boolean) => files.set(path, exists),
+    setTunnelAlive: (alive: boolean) => { tunnelAlive = alive; },
   });
 }
 

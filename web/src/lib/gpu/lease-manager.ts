@@ -530,22 +530,29 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
 
   /** Start the in-container SSH tunnel: local 9876 -> instance 9876. */
   async function startTunnel(container: ContainerRow, target: { host: string; port: number }): Promise<void> {
-    // The tunnel runs as appuser. -N = no remote command, -f = background,
-    // -L = local forward. Uses the container's own SSH key. ServerAliveInterval
-    // keeps it from dying on idle.
+    // autossh supervises the SSH tunnel: auto-restarts on death and uses SSH
+    // keepalives for reliable failure detection. -M 0 = no legacy monitor port
+    // (relies on ServerAliveInterval). -f = background. AUTOSSH_GATETIME=0
+    // skips the 30s pre-start delay so the tunnel comes up immediately.
+    // ExitOnForwardFailure=yes makes startup failures visible (the old
+    // `2>/dev/null || true` swallowed them, so the watchdog saw "dead" every
+    // 10s with no clue why). stderr is appended to a logfile for diagnosis.
     const cmd = [
       "bash",
       "-lc",
-      `ssh -i ${SSH_KEY_PATH} -NfL ${BLENDER_PORT}:127.0.0.1:${BLENDER_PORT} -p ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=30 -o ServerAliveCountMax=3 root@${target.host} 2>/dev/null || true`,
+      `AUTOSSH_GATETIME=0 AUTOSSH_LOGFILE=/tmp/autossh-${BLENDER_PORT}.log autossh -M 0 -f -N -L ${BLENDER_PORT}:127.0.0.1:${BLENDER_PORT} -i ${SSH_KEY_PATH} -p ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ServerAliveInterval=10 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o ConnectTimeout=10 root@${target.host} 2>>/tmp/autossh-${BLENDER_PORT}.log || echo "[startTunnel] autossh failed to start: exit=$?"`,
     ];
     await exec(container, cmd, { user: APP_USER });
   }
 
   /** Kill the in-container SSH tunnel (best-effort). */
   async function stopTunnel(container: ContainerRow): Promise<void> {
+    // Kill autossh and any orphaned ssh tunnel it spawned. autossh's child ssh
+    // is usually cleaned up by SIGTERM propagation, but the second pkill is a
+    // belt-and-suspenders for orphans.
     await exec(
       container,
-      ["bash", "-lc", `pkill -f "ssh -NfL ${BLENDER_PORT}:" 2>/dev/null || true`],
+      ["bash", "-lc", `pkill -f "autossh.*${BLENDER_PORT}:" 2>/dev/null; pkill -f "ssh -NfL ${BLENDER_PORT}:" 2>/dev/null; true`],
       { user: APP_USER },
     ).catch(() => {});
   }
@@ -1108,15 +1115,25 @@ __STATE_EOF__`;
     if (inst && inst.cur_state === "running") {
       // Only check tunnel for leases that are ready (not still provisioning).
       if (sshHost && sshPort && container && current.state === "ready") {
-        const probe = await exec(
-          container,
-          ["bash", "-lc", `nc -z 127.0.0.1 ${BLENDER_PORT} 2>/dev/null && echo ok || echo dead`],
-          { user: APP_USER },
-        ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
-        if (!probe.stdout.includes("ok")) {
+        // Probe with retry: 3 attempts, 1s apart. A single transient nc
+        // failure (port not yet bound after autossh -f forks, brief exec
+        // hiccup) should not trigger a kill+restart cycle. autossh handles
+        // tunnel-level reconnection itself; this watchdog only intervenes if
+        // autossh itself has died.
+        let alive = false;
+        for (let attempt = 0; attempt < 3 && !alive; attempt++) {
+          if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
+          const probe = await exec(
+            container,
+            ["bash", "-lc", `nc -z 127.0.0.1 ${BLENDER_PORT} 2>/dev/null && echo ok || echo dead`],
+            { user: APP_USER },
+          ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
+          if (probe.stdout.includes("ok")) alive = true;
+        }
+        if (!alive) {
+          console.log(`[watchdog] ${lease.instance_id}: tunnel dead after 3 probes, restarting autossh`);
           await stopTunnel(container);
           await startTunnel(container, { host: sshHost, port: sshPort });
-          console.log(`[watchdog] ${lease.instance_id}: re-established dead tunnel`);
         }
       }
       return;
