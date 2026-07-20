@@ -30,6 +30,7 @@ function openDb(): Database.Database {
   migrateGpuLeasesLastError(conn);
   migrateGpuLeasesManuallyReleased(conn);
   migrateGpuLeasesQueueDiagnostics(conn);
+  migrateGpuLeasesReleasingSince(conn);
   seedDefaultUser(conn);
   _db = conn;
   return conn;
@@ -155,6 +156,7 @@ function migrate(conn: Database.Database) {
       last_synced_at INTEGER,         -- ms epoch of the last successful .blend sync-down
       last_error     TEXT,            -- last provisioning/recovery error (surfaced to UI)
       manually_released INTEGER NOT NULL DEFAULT 0, -- 1 when the user explicitly released the GPU; suppresses auto-reacquire (watchdog reProvision + frontend lane-open effect) until an explicit Acquire clears it
+      releasing_since INTEGER,          -- ms epoch when state entered 'releasing'; watchdog reaper force-completes a release older than RELEASE_DEADLINE_MS regardless of poller activity
       FOREIGN KEY(instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
     );
   `);
@@ -206,6 +208,24 @@ export function migrateGpuLeasesQueueDiagnostics(conn: Database.Database): void 
   }
   if (!cols.some((c) => c.name === "queue_search_error")) {
     conn.exec("ALTER TABLE gpu_leases ADD COLUMN queue_search_error TEXT");
+  }
+}
+
+/**
+ * Add releasing_since to pre-existing gpu_leases tables (idempotent).
+ *
+ * `releasing_since` is the ms-epoch timestamp at which a lease entered the
+ * `releasing` state. The watchdog reaper uses it as a poller-independent
+ * wall-clock deadline: if a release hasn't reached `destroyed` within
+ * RELEASE_DEADLINE_MS, the reaper force-completes it — regardless of whether
+ * the frontend's GET poll is still bumping `last_activity` (which it does
+ * every 5s while the lane is open, defeating the old last_activity-only check).
+ */
+export function migrateGpuLeasesReleasingSince(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(gpu_leases)").all() as Array<{ name: string }>;
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  if (!cols.some((c) => c.name === "releasing_since")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN releasing_since INTEGER");
   }
 }
 

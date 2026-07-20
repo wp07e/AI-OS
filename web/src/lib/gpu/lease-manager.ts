@@ -82,6 +82,15 @@ export interface LeaseRow {
    * explicit Acquire. The row is persisted in state "destroyed" while set.
    */
   manually_released: number;
+  /**
+   * ms epoch at which the lease entered the `releasing` state (null otherwise).
+   * The watchdog reaper uses this as a poller-independent wall-clock deadline:
+   * if a release hasn't reached `destroyed` within RELEASE_DEADLINE_MS, the
+   * reaper force-completes it — even if the frontend GET poll is still bumping
+   * `last_activity` (which it does every 5s while the lane is open, defeating
+   * the old last_activity-only stranded check).
+   */
+  releasing_since: number | null;
 }
 
 const now = () => Date.now();
@@ -200,11 +209,11 @@ function upsertLease(row: LeaseRow): void {
          (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, ssh_key_id,
           queue_position, queue_requested_at, queue_last_checked_at, queue_search_error,
           acquired_at, last_activity, last_synced_at, last_error,
-          manually_released)
+          manually_released, releasing_since)
        VALUES (@instance_id, @user_id, @state, @vast_id, @gpu_name, @dph, @ssh_host, @ssh_port, @ssh_key_id,
           @queue_position, @queue_requested_at, @queue_last_checked_at, @queue_search_error,
           @acquired_at, @last_activity, @last_synced_at, @last_error,
-          @manually_released)
+          @manually_released, @releasing_since)
        ON CONFLICT(instance_id) DO UPDATE SET
          state=excluded.state, vast_id=excluded.vast_id, gpu_name=excluded.gpu_name,
          dph=excluded.dph, ssh_host=excluded.ssh_host, ssh_port=excluded.ssh_port,
@@ -213,7 +222,8 @@ function upsertLease(row: LeaseRow): void {
          queue_last_checked_at=excluded.queue_last_checked_at,
          queue_search_error=excluded.queue_search_error,
          last_activity=excluded.last_activity, last_synced_at=excluded.last_synced_at,
-         last_error=excluded.last_error`,
+         last_error=excluded.last_error,
+         releasing_since=excluded.releasing_since`,
     )
     .run(row);
 }
@@ -760,6 +770,7 @@ __STATE_EOF__`;
         last_synced_at: null,
         last_error: null,
         manually_released: 0,
+        releasing_since: null,
       };
       // Atomically reserve a slot (or queue if at capacity) before provisioning.
       if (!claimConcurrencySlot(reset, maxConcurrent)) {
@@ -808,6 +819,7 @@ __STATE_EOF__`;
       last_synced_at: null,
       last_error: null,
       manually_released: 0,
+      releasing_since: null,
     };
 
     if (!claimConcurrencySlot(base, maxConcurrent)) {
@@ -952,8 +964,11 @@ __STATE_EOF__`;
       const sshKeyId = lease.ssh_key_id;
       // Transitional state SYNCHRONOUSLY: releasing + flag. ssh/vast fields stay
       // intact so the background sync can still reach the instance; they are
-      // nulled only when the row reaches `destroyed`.
-      upsertLease({ ...lease, state: "releasing", manually_released: 1 });
+      // nulled only when the row reaches `destroyed`. releasing_since stamps the
+      // wall-clock entry into `releasing` so the reaper can force-complete a
+      // release that hasn't reached `destroyed` within RELEASE_DEADLINE_MS
+      // regardless of poller activity.
+      upsertLease({ ...lease, state: "releasing", manually_released: 1, releasing_since: now() });
       setManuallyReleased(instanceId, 1);
       // Background: save → sync → stop tunnel → destroy → delete ssh key →
       // terminal `destroyed` + null instance fields. Tracked so a second release
@@ -989,6 +1004,7 @@ __STATE_EOF__`;
               ssh_port: null,
               vast_id: null,
               ssh_key_id: null,
+              releasing_since: null,
             });
           }
         } finally {
@@ -1005,7 +1021,7 @@ __STATE_EOF__`;
     // remains, so the next lane open auto-acquires (state="none"). This keeps
     // crash/idle recovery "just works" — only an explicit user release suppresses
     // auto-reacquire.
-    upsertLease({ ...lease, state: "releasing" });
+    upsertLease({ ...lease, state: "releasing", releasing_since: now() });
     try {
       await saveSyncAndStopTunnel(lease, container);
     } finally {
@@ -1030,9 +1046,24 @@ __STATE_EOF__`;
    * Age beyond which a 'releasing' row is considered stranded (its releaseImpl
    * was killed — e.g. the request hit maxDuration=300s mid-destroy — before it
    * could call deleteLease / reach the destroyed terminal state). The watchdog
-   * reaps such rows so the UI never gets stuck on "Releasing…" forever.
+   * reaps such rows so the UI never gets stuck on "Releasing…" forever. Now that
+   * touch() no longer refreshes releasing/destroyed rows, the poller can't
+   * defeat this check — the row's last_activity goes stale ~STALE_RELEASING_MS
+   * after release begins, independent of the destroy chain's progress. The
+   * faster STALE_RELEASING_MS path fires when the chain is simply slow; the
+   * RELEASE_DEADLINE_MS (below) is the hard backstop.
    */
-  const STALE_RELEASING_MS = 90_000;
+  const STALE_RELEASING_MS = 60_000;
+
+  /**
+   * Hard wall-clock deadline on the 'releasing' state, keyed on releasing_since.
+   * Independent of poller activity (the frontend GET poll bumps last_activity
+   * every 5s, which used to mask a stuck release indefinitely). A release older
+   * than this is force-completed no matter what — so a hung scp/vastai await
+   * can't bill the user forever. Intentionally longer than STALE_RELEASING_MS so
+   * the faster last_activity path is the common case; this is the guarantee.
+   */
+  const RELEASE_DEADLINE_MS = 120_000;
 
   async function watchdogTick(): Promise<void> {
     // 1. Liveness + recovery for active leases.
@@ -1065,11 +1096,19 @@ __STATE_EOF__`;
    * the per-instance lock so it can't race acquire/watchdog for the same row.
    */
   async function reapReleases(): Promise<void> {
+    // Two independent stranded-release conditions (either fires the reaper):
+    //  - last_activity is older than STALE_RELEASING_MS (the pre-existing check,
+    //    now reliable because touch() no longer refreshes releasing rows), OR
+    //  - releasing_since is older than RELEASE_DEADLINE_MS (a poller-independent
+    //    wall-clock backstop — a release that's been in flight >120s is force-
+    //    completed regardless of what the poller is doing to last_activity).
     const staleReleasing = db()
       .prepare(
-        "SELECT * FROM gpu_leases WHERE state = 'releasing' AND last_activity < ?",
+        `SELECT * FROM gpu_leases
+         WHERE state = 'releasing'
+           AND (last_activity < ? OR (releasing_since IS NOT NULL AND releasing_since < ?))`,
       )
-      .all(now() - STALE_RELEASING_MS) as LeaseRow[];
+      .all(now() - STALE_RELEASING_MS, now() - RELEASE_DEADLINE_MS) as LeaseRow[];
     for (const lease of staleReleasing) {
       // Priority lane: if the release's background IIFE is still running (flag
       // is set), skip — it will complete the release. Only force-complete if
@@ -1078,7 +1117,8 @@ __STATE_EOF__`;
       await withLock(lease.instance_id, async () => {
         const cur = getLease(lease.instance_id);
         if (!cur || cur.state !== "releasing") return; // resolved since the query
-        console.warn(`[watchdog] ${lease.instance_id}: reaping stranded 'releasing' row (last_activity ${Math.round((now() - cur.last_activity) / 1000)}s ago)`);
+        const sinceMs = cur.releasing_since ?? cur.last_activity;
+        console.warn(`[watchdog] ${lease.instance_id}: reaping stranded 'releasing' row (in flight ${Math.round((now() - sinceMs) / 1000)}s ago)`);
         const container = db()
           .prepare("SELECT * FROM containers WHERE user_id = ?")
           .get(cur.user_id) as ContainerRow | undefined;
@@ -1100,6 +1140,7 @@ __STATE_EOF__`;
             ssh_host: null,
             ssh_port: null,
             ssh_key_id: null,
+            releasing_since: null,
           });
         } else {
           deleteLease(cur.instance_id);
@@ -1601,7 +1642,16 @@ __STATE_EOF__`;
       }
     },
     touch: (instanceId) => {
-      db().prepare("UPDATE gpu_leases SET last_activity = ? WHERE instance_id = ?").run(now(), instanceId);
+      // Do NOT refresh last_activity for releasing/destroyed rows. The frontend
+      // GET /lease poller calls touch() every 5s while the lane is open; without
+      // this gate a stuck release's last_activity stays fresh forever and the
+      // reaper never sees it as stranded. The releasing_since deadline is the hard
+      // backstop, but this gate lets the faster STALE_RELEASING_MS path fire.
+      db()
+        .prepare(
+          "UPDATE gpu_leases SET last_activity = ? WHERE instance_id = ? AND state NOT IN ('releasing','destroyed')",
+        )
+        .run(now(), instanceId);
     },
     get: getLease,
     retryQueued: (instanceId) => withLock(instanceId, () => retryQueuedImpl(instanceId)),

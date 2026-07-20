@@ -720,6 +720,7 @@ function seedLease(over: Partial<{
   last_activity: number;
   acquired_at: number;
   manually_released: number;
+  releasing_since: number | null;
   queue_position: number | null;
   queue_requested_at: number | null;
   last_error: string | null;
@@ -730,10 +731,10 @@ function seedLease(over: Partial<{
          (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port,
           ssh_key_id, queue_position, queue_requested_at, queue_last_checked_at,
           queue_search_error, acquired_at, last_activity,
-          last_synced_at, last_error, manually_released)
+          last_synced_at, last_error, manually_released, releasing_since)
        VALUES (@instance_id, @user_id, @state, @vast_id, 'RTX 4060', 0.07, @ssh_host, @ssh_port,
           NULL, @queue_position, @queue_requested_at, NULL, NULL,
-          @acquired_at, @last_activity, NULL, @last_error, @manually_released)`,
+          @acquired_at, @last_activity, NULL, @last_error, @manually_released, @releasing_since)`,
     )
     .run({
       instance_id: "inst-1",
@@ -745,6 +746,7 @@ function seedLease(over: Partial<{
       last_activity: Date.now(),
       acquired_at: Date.now(),
       manually_released: 0,
+      releasing_since: null,
       queue_position: null,
       queue_requested_at: null,
       last_error: null,
@@ -1014,6 +1016,79 @@ describe("lease manager: reapReleases finalizes stranded rows", () => {
     expect(row).not.toBeNull();
     expect(row!.state).toBe("destroyed");
     expect(row!.vast_id).toBeNull(); // finalized
+  });
+
+  it("reaps a stuck manual release even while the poller keeps touching last_activity (poller-defeat regression)", async () => {
+    // Regression for the bug where a stuck release bills indefinitely: the
+    // frontend GET /lease poller calls touch() every 5s while the lane is open,
+    // which (previously) bumped last_activity on the releasing row forever,
+    // defeating the reaper's last_activity-age check. The fix: (a) touch() no
+    // longer refreshes releasing/destroyed rows, AND (b) a poller-independent
+    // releasing_since wall-clock deadline force-reaps. This test exercises (b):
+    // even with continuous touching, a release older than RELEASE_DEADLINE_MS
+    // is reaped.
+    const vast = mockVast();
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 20,
+      idleReaperIntervalMs: 60_000,
+      destroyRetries: 1,
+    });
+    // A manual release started 150s ago (past RELEASE_DEADLINE_MS=120s). Its
+    // last_activity is FRESH (as if the poller just touched it) — this is the
+    // exact defeat scenario. releasing_since is what must trigger the reap.
+    seedLease({
+      state: "releasing",
+      manually_released: 1,
+      vast_id: 500,
+      last_activity: Date.now(), // fresh — poller just touched
+      releasing_since: Date.now() - 150_000, // but release started 150s ago
+    });
+
+    mgr.start();
+    // Continuously touch (simulate the 5s poller) during the wait window to
+    // prove the reap does NOT depend on last_activity going stale.
+    const poller = setInterval(() => mgr.touch("inst-1"), 25);
+    await new Promise((r) => setTimeout(r, 200));
+    clearInterval(poller);
+    mgr.stop();
+    await new Promise((r) => setTimeout(r, 30));
+
+    // Reaped despite the fresh last_activity, because releasing_since > deadline.
+    expect(vast.mocks.destroyInstance).toHaveBeenCalledWith(500);
+    const row = mgr.get("inst-1");
+    expect(row).not.toBeNull();
+    expect(row!.state).toBe("destroyed");
+    expect(row!.manually_released).toBe(1);
+    expect(row!.releasing_since).toBeNull(); // cleared on finalize
+  });
+
+  it("does NOT update last_activity when touching a releasing/destroyed lease", async () => {
+    // Guards the touch() gate: touch() must not refresh releasing/destroyed rows,
+    // or the last_activity-based reaper path is defeated by the GET poller.
+    const vast = mockVast();
+    const mgr = createLeaseManager({
+      vast,
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      watchdogIntervalMs: 60_000, // don't let the watchdog reap mid-test
+      idleReaperIntervalMs: 60_000,
+    });
+    const staleActivity = Date.now() - 5_000;
+    seedLease({ state: "releasing", manually_released: 1, last_activity: staleActivity });
+
+    mgr.touch("inst-1");
+    // last_activity unchanged on a releasing row.
+    expect(mgr.get("inst-1")!.last_activity).toBe(staleActivity);
+
+    // A ready lease IS still refreshed (sanity — the gate is state-specific).
+    db().prepare("DELETE FROM gpu_leases").run();
+    seedLease({ state: "ready", last_activity: staleActivity });
+    mgr.touch("inst-1");
+    expect(mgr.get("inst-1")!.last_activity).toBeGreaterThan(staleActivity);
+    mgr.stop();
   });
 });
 
