@@ -135,8 +135,9 @@ function mockExec(): ContainerExec & { responses: Record<string, string>; setFil
     if (bashCmd.includes("pkill")) {
       return { code: 0, stdout: "", stderr: "" };
     }
-    // nc probe of the local tunnel — respects setTunnelAlive().
-    if (bashCmd.includes("nc -z 127.0.0.1")) {
+    // Tunnel liveness probe (/dev/tcp — bash builtin, not nc which isn't
+    // installed in the node:*-slim image). Respects setTunnelAlive().
+    if (bashCmd.includes("/dev/tcp/127.0.0.1")) {
       return tunnelAlive
         ? { code: 0, stdout: "ok\n", stderr: "" }
         : { code: 1, stdout: "dead\n", stderr: "" };
@@ -879,7 +880,7 @@ describe("lease manager: SSH tunnel (autossh)", () => {
     expect(tunnelCmd).not.toContain("2>/dev/null || true");
   });
 
-  it("stopTunnel kills autossh by pattern (not the old ssh -NfL pattern alone)", async () => {
+  it("stopTunnel kills autossh AND orphaned ssh children (correct pattern)", async () => {
     const vast = mockVast();
     const exec = mockExec();
     const mgr = createLeaseManager({ vast, exec, fileOps: mockFileOps() });
@@ -894,8 +895,14 @@ describe("lease manager: SSH tunnel (autossh)", () => {
     });
     expect(stopCmd).toBeDefined();
     const cmdStr = (stopCmd![1] as string[])[2];
-    // Kills autossh and also the orphaned ssh child as belt-and-suspenders.
+    // First pkill: kills autossh so it stops respawning ssh.
     expect(cmdStr).toContain('pkill -f "autossh.*9876:"');
+    // Second pkill: kills orphaned ssh children. The pattern must match
+    // "-N -L 9876:" (autossh passes -N and -L without -f). The old pattern
+    // "ssh -NfL 9876:" didn't match, leaving orphans to hold port 9876.
+    expect(cmdStr).toContain('pkill -f "ssh.*-L.*9876:"');
+    // Must NOT use the old broken pattern.
+    expect(cmdStr).not.toContain('ssh -NfL');
   });
 });
 

@@ -48,6 +48,13 @@ FROM node:${NODE_VERSION}-slim AS runtime
 # autossh: supervises the tunnel — auto-restarts on death and uses SSH
 #   keepalives for reliable failure detection, replacing the hand-rolled
 #   watchdog kill+restart cycle that flapped every 10s. See web/src/lib/gpu/.
+# procps: provides pkill/ps — required by stopTunnel to kill autossh + orphaned
+#   ssh children. Without it, pkill is a silent no-op (command not found,
+#   swallowed by 2>/dev/null) and processes accumulate.
+# netcat-openbsd: provides nc — the old watchdog probe used `nc -z` which was
+#   a silent no-op (command not found, swallowed by 2>/dev/null) so it ALWAYS
+#   returned "dead". The probe now uses /dev/tcp (bash builtin) but nc is
+#   included as backup for any scripts that still reference it.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
@@ -58,6 +65,9 @@ RUN apt-get update \
       bash \
       socat \
       iproute2 \
+      procps \
+      netcat-openbsd \
+      procps \
       ffmpeg \
       openssh-client \
       autossh \

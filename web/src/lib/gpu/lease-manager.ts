@@ -547,12 +547,18 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
 
   /** Kill the in-container SSH tunnel (best-effort). */
   async function stopTunnel(container: ContainerRow): Promise<void> {
-    // Kill autossh and any orphaned ssh tunnel it spawned. autossh's child ssh
-    // is usually cleaned up by SIGTERM propagation, but the second pkill is a
-    // belt-and-suspenders for orphans.
+    // Kill autossh first (so it stops respawning ssh), then kill any orphaned
+    // ssh children. autossh propagates SIGTERM to its ssh child, but orphans
+    // from previously-killed autossh processes can survive and hold the port.
+    //
+    // CRITICAL: the ssh child's cmdline has "-N -L 9876:" (autossh passes -N
+    // and -L through WITHOUT the -f flag, which is autossh's own). The old
+    // pattern "ssh -NfL 9876:" didn't match, leaving orphans alive to hold
+    // port 9876 — causing new autossh processes to fail with
+    // ExitOnForwardFailure=yes (error 255) and accumulate.
     await exec(
       container,
-      ["bash", "-lc", `pkill -f "autossh.*${BLENDER_PORT}:" 2>/dev/null; pkill -f "ssh -NfL ${BLENDER_PORT}:" 2>/dev/null; true`],
+      ["bash", "-lc", `pkill -f "autossh.*${BLENDER_PORT}:" 2>/dev/null; sleep 0.2; pkill -f "ssh.*-L.*${BLENDER_PORT}:" 2>/dev/null; true`],
       { user: APP_USER },
     ).catch(() => {});
   }
@@ -1115,17 +1121,22 @@ __STATE_EOF__`;
     if (inst && inst.cur_state === "running") {
       // Only check tunnel for leases that are ready (not still provisioning).
       if (sshHost && sshPort && container && current.state === "ready") {
-        // Probe with retry: 3 attempts, 1s apart. A single transient nc
+        // Probe with retry: 3 attempts, 1s apart. A single transient
         // failure (port not yet bound after autossh -f forks, brief exec
         // hiccup) should not trigger a kill+restart cycle. autossh handles
         // tunnel-level reconnection itself; this watchdog only intervenes if
         // autossh itself has died.
+        //
+        // CRITICAL: uses /dev/tcp (bash builtin) NOT nc — the node:*-slim
+        // image does NOT include netcat. The old `nc -z` probe was a silent
+        // no-op (command not found, swallowed by 2>/dev/null), so it ALWAYS
+        // returned "dead" regardless of whether the port was actually open.
         let alive = false;
         for (let attempt = 0; attempt < 3 && !alive; attempt++) {
           if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
           const probe = await exec(
             container,
-            ["bash", "-lc", `nc -z 127.0.0.1 ${BLENDER_PORT} 2>/dev/null && echo ok || echo dead`],
+            ["bash", "-lc", `(echo > /dev/tcp/127.0.0.1/${BLENDER_PORT}) 2>/dev/null && echo ok || echo dead`],
             { user: APP_USER },
           ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
           if (probe.stdout.includes("ok")) alive = true;

@@ -173,8 +173,9 @@ export function mockExec(): ContainerExec & {
     if (bashCmd.includes("pkill")) {
       return { code: 0, stdout: "", stderr: "" };
     }
-    // nc probe of the local tunnel — respects setTunnelAlive().
-    if (bashCmd.includes("nc -z 127.0.0.1")) {
+    // Tunnel liveness probe (/dev/tcp — bash builtin, not nc which isn't
+    // installed in the node:*-slim image). Respects setTunnelAlive().
+    if (bashCmd.includes("/dev/tcp/127.0.0.1")) {
       return tunnelAlive
         ? { code: 0, stdout: "ok\n", stderr: "" }
         : { code: 1, stdout: "dead\n", stderr: "" };
