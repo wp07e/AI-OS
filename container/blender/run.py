@@ -190,6 +190,62 @@ print('RENDER_DONE')
     S.append_memory(folder, f"Rendered frames {frame_start}-{frame_end} ({engine}, {samples} samples, {resolution}).")
 
 
+def op_preview(folder: str, request: dict) -> None:
+    """Quick EEVEE preview via the blender-mcp socket (NOT the MCP bridge).
+
+    The agent's interactive `execute_code` previews are bound by the blender
+    MCP bridge's ~120s timeout, which complex scenes exceed — forcing the agent
+    to drop to 640x360 and hobbling its vision checks. This op uses the same
+    direct-socket path as op_render (`_send_to_blender`, 600s timeout), so a
+    preview can't time out the bridge. It renders a single EEVEE frame to
+    RENDER_DIR_REMOTE/preview.png and writes a renders[] preview entry the
+    canvas picks up. Overwrites the previous preview.
+    """
+    settings = request.get("settings", {})
+    samples = int(settings.get("samples", 16))
+    res_x = int(settings.get("resolution_x", 960))
+    res_y = int(settings.get("resolution_y", 540))
+
+    S.write_state(folder, "rendering", active={"op": "preview", "label": f"Preview EEVEE {samples}s {res_x}x{res_y}"})
+
+    code = f"""
+import bpy, os
+scene = bpy.context.scene
+scene.render.engine = 'BLENDER_EEVEE_NEXT'
+scene.eeveee.taa_render_samples = {samples}
+scene.render.resolution_x = {res_x}
+scene.render.resolution_y = {res_y}
+scene.render.image_settings.file_format = 'PNG'
+os.makedirs('{RENDER_DIR_REMOTE}', exist_ok=True)
+scene.render.filepath = '{RENDER_DIR_REMOTE}/preview.png'
+scene.frame_start = 1
+scene.frame_end = 1
+bpy.ops.render.render(animation=True, write_still=True)
+print('PREVIEW_DONE')
+"""
+    resp = _send_to_blender(code, timeout=600.0)
+    if not resp.get("success"):
+        S.write_state(folder, "error", errors=[f"preview failed: {resp.get('result', 'unknown')}"])
+        sys.exit(1)
+
+    # Return to the idle-ready phase (not "complete", which the UI treats as a
+    # final render). The renders[] entry is what the canvas displays.
+    S.write_state(
+        folder,
+        "gpu_ready",
+        active=None,
+        renders=[{
+            "id": "preview",
+            "label": "Preview",
+            "path": "exports/preview.png",
+            "thumbPath": "exports/preview.png",
+            "engine": "BLENDER_EEVEE_NEXT",
+            "samples": samples,
+            "createdAt": _now_iso(),
+        }],
+    )
+
+
 def op_sync_down(folder: str) -> None:
     """Sync artifacts from the GPU instance to the local workspace.
 
@@ -272,6 +328,8 @@ def main() -> int:
             op_bootstrap(folder)
         elif op == "render":
             op_render(folder, request)
+        elif op == "preview":
+            op_preview(folder, request)
         elif op == "sync_down":
             op_sync_down(folder)
         elif op == "sync_up":

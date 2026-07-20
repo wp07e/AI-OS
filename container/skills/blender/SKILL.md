@@ -60,9 +60,24 @@ tight loop.
    data loss if the GPU instance dies.
 
 4. **Produce a quick preview after every meaningful change** so the user sees
-   visual feedback in the canvas immediately. Do a fast EEVEE render (not a full
-   Cycles batch) and update state.json to point at it. Run this via
-   `execute_code`:
+   visual feedback in the canvas immediately. **Trigger it via the preview
+   route**, NOT `execute_code`:
+   ```
+   POST /api/workspace/<id>/blender/preview
+   body: {"settings": {"samples": 16, "resolution_x": 960, "resolution_y": 540}}
+   ```
+   This runs `op:preview` through the helper script, which talks to the same
+   Blender socket your MCP tools use but with a **600s budget** and is
+   fire-and-forget. Do NOT run the preview via `execute_code`
+   (`bpy.ops.render.render`) on anything but a trivial scene — `execute_code`
+   goes through the MCP bridge and is capped at **~120s**, so complex scenes
+   time out and force you down to an unusably small 640x360. The preview route
+   has no such ceiling. After POSTing, poll `state.json` (phase goes
+   `starting` → `rendering` → `gpu_ready`) and the renders[] preview entry; the
+   host syncs `exports/preview.png` from the GPU within ~5s.
+
+   The `execute_code` preview (below) is a fallback ONLY for tiny scenes where
+   its 120s limit can't bind:
    ```python
    import bpy, os
    scene = bpy.context.scene
@@ -76,8 +91,7 @@ tight loop.
    bpy.ops.render.render(write_still=True)
    ```
    Then update `state.json` with a renders[] entry pointing at
-   `exports/preview.png` (the host sync pulls it from the GPU instance within
-   ~60s):
+   `exports/preview.png`:
    ```json
    {"id": "preview", "label": "Preview", "path": "exports/preview.png",
     "thumbPath": "exports/preview.png", "engine": "BLENDER_EEVEE_NEXT", "samples": 16,
