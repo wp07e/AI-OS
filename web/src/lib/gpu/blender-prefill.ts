@@ -89,6 +89,9 @@ export async function buildBlenderLeasePrefill(
       `You are connected to a remote Blender instance via the blender MCP tools. Use them directly for scene work (create_object, execute_code, get_render, Poly Haven assets, etc.).`,
     );
     lines.push(
+      `94 specialized Blender skills (SKILL.md files) are installed in /workspace/skills/ — covering animation, archviz, materials, lighting, rigging, compositing, geometry nodes, and more. Run ls /workspace/skills/ to browse them, and read the relevant SKILL.md before tackling a complex technique you're unsure about.`,
+    );
+    lines.push(
       `Workflow after every meaningful change: (1) save via execute_code bpy.ops.wm.save_as_mainfile(filepath="/root/blender/scene.blend"), (2) trigger a quick EEVEE preview render (16 samples, 960x540) via POST /api/workspace/<id>/blender/preview (NOT execute_code — the preview route has a 600s budget via the direct socket; execute_code is capped at ~120s by the MCP bridge), (3) poll state.json (phase goes starting → rendering → gpu_ready) and the renders[] preview entry at exports/preview.png so the user sees visual feedback. The host syncs the preview from the GPU to the workspace within ~5s.`,
     );
     lines.push(

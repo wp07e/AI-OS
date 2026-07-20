@@ -104,6 +104,17 @@ COPY opencode.jsonc ${APP_DIR}/opencode.jsonc
 COPY AGENTS.md      ${APP_DIR}/AGENTS.md
 COPY skills/        ${APP_DIR}/skills/
 COPY fixtures/      ${APP_DIR}/fixtures/
+# Install the blender-skills pack (94 specialized Blender SKILL.md files from
+# https://github.com/arjun988/blender-skills) into the skills directory. These
+# get synced to /workspace/skills/ by entrypoint.sh, giving the agent technique-
+# specific guidance (animation, archviz, materials, lighting, etc.) for Blender
+# work. Cloned at build time so no runtime network access is needed. Uses
+# --depth 1 for a small clone and --no-clobber so existing project skills are
+# never overwritten by a name collision.
+ARG BLENDER_SKILLS_REF=main
+RUN git clone --depth 1 https://github.com/arjun988/blender-skills.git /tmp/blender-skills \
+ && cp -rn /tmp/blender-skills/.claude/skills/. ${APP_DIR}/skills/ \
+ && rm -rf /tmp/blender-skills
 # Deterministic carousel pipeline (drives the Canva MCP directly over HTTPS,
 # bypassing opencode for generation). The agent runs these scripts instead of
 # calling Canva generation tools itself — eliminates model-to-model variance.

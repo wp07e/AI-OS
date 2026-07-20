@@ -94,6 +94,17 @@ When the user asks for something that matches a skill, follow that skill's
 procedure. For example, the `canva-carousel` skill describes how to produce a
 designed Instagram carousel from a brief.
 
+### Blender skills
+
+94 specialized Blender skills from the [blender-skills](https://github.com/arjun988/blender-skills)
+pack are installed in `/workspace/skills/`. Each is a `SKILL.md` file (with
+optional `references/`) covering a specific technique: animation, archviz,
+materials, lighting, character rigging, compositing, geometry nodes, and more.
+When tackling a complex Blender task, `ls /workspace/skills/` to find a matching
+skill and read its `SKILL.md` before proceeding — they contain expert-level
+setup guides, parameter cheatsheets, and workflow shortcuts that save
+trial-and-error.
+
 ## Summary of rules
 
 1. Write files only under `/workspace/...` — never `/app`, `/tmp`, or elsewhere.
