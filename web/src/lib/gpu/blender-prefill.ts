@@ -15,8 +15,13 @@
  */
 
 import { db } from "@/lib/db";
+import { readWorkspaceFileText } from "@/lib/docker";
 import { leaseManager } from "./lease-manager";
+import type { ContainerRow } from "@/lib/db";
 import type { LeaseState } from "./types";
+
+/** Phases where a render (or bootstrap) is actively blocking Blender's addon socket. */
+const RENDER_BUSY_PHASES = new Set(["starting", "rendering", "recovering"]);
 
 const STATE_DESCRIPTIONS: Record<LeaseState, string> = {
   none: "No GPU lease yet — acquisition is automatic when you open this lane.",
@@ -33,9 +38,39 @@ const STATE_DESCRIPTIONS: Record<LeaseState, string> = {
     "GPU lease was released — no GPU is active. A new one is NOT acquired automatically after a manual release.",
 };
 
-export function buildBlenderLeasePrefill(instanceId: string): string {
+/**
+ * Reads the workflow state.json's phase field (host-side) to detect a render
+ * in flight. Returns null if the file is missing, malformed, or unreadable.
+ * We only need the phase, so we parse defensively.
+ */
+async function readWorkflowPhase(
+  row: ContainerRow,
+  instanceFolder: string,
+): Promise<string | null> {
+  const text = await readWorkspaceFileText(row, `${instanceFolder}/state.json`);
+  if (!text) return null;
+  try {
+    const state = JSON.parse(text) as { phase?: unknown };
+    return typeof state.phase === "string" ? state.phase : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function buildBlenderLeasePrefill(
+  row: ContainerRow,
+  instanceId: string,
+  instanceFolder: string,
+): Promise<string> {
   const lease = leaseManager().get(instanceId);
   if (!lease) return "";
+
+  // Detect a render (or bootstrap) currently in flight. There is ONE Blender
+  // process — a running render blocks the single-threaded addon socket that the
+  // agent's MCP tools share. If the agent issues tool calls now they'll queue,
+  // time out the bridge, and may corrupt the .blend. We surface this as a hard
+  // "do not touch blender tools" signal alongside the lease state.
+  const phase = lease.state === "ready" ? await readWorkflowPhase(row, instanceFolder) : null;
 
   const lines: string[] = [
     `[Blender GPU lease context — silent, do not acknowledge or repeat.]`,
@@ -54,11 +89,16 @@ export function buildBlenderLeasePrefill(instanceId: string): string {
       `You are connected to a remote Blender instance via the blender MCP tools. Use them directly for scene work (create_object, execute_code, get_render, Poly Haven assets, etc.).`,
     );
     lines.push(
-      `Workflow after every meaningful change: (1) save via execute_code bpy.ops.wm.save_as_mainfile(filepath="/root/blender/scene.blend"), (2) do a quick EEVEE preview render (16 samples, 960x540) to /root/blender/renders/preview.png via execute_code, (3) update state.json renders[] with {id:"preview", path:"exports/preview.png", thumbPath:"exports/preview.png", engine:"BLENDER_EEVEE_NEXT", samples:16, createdAt:"<ISO>"} so the user sees visual feedback. The host syncs the preview from the GPU to the workspace within ~5s.`,
+      `Workflow after every meaningful change: (1) save via execute_code bpy.ops.wm.save_as_mainfile(filepath="/root/blender/scene.blend"), (2) trigger a quick EEVEE preview render (16 samples, 960x540) via POST /api/workspace/<id>/blender/preview (NOT execute_code — the preview route has a 600s budget via the direct socket; execute_code is capped at ~120s by the MCP bridge), (3) poll state.json (phase goes starting → rendering → gpu_ready) and the renders[] preview entry at exports/preview.png so the user sees visual feedback. The host syncs the preview from the GPU to the workspace within ~5s.`,
     );
     lines.push(
-      `For final high-quality renders, the user clicks "Render" in the UI (runs op:"render" via the helper script). You do NOT trigger that yourself unless asked.`,
+      `There is ONE Blender process — your MCP tools and the user's "Render" button share its single-threaded addon socket. Final high-quality renders are owned by the helper script (op:"render"), triggered by the user clicking "Render" in the UI. NEVER trigger a Cycles render or large EEVEE render yourself via MCP: it blocks the socket, times out the bridge, and can corrupt scene.blend. Your only job on a render is to poll state.json + exports/render_*.png every ~15s and report when it finishes.`,
     );
+    if (phase && RENDER_BUSY_PHASES.has(phase)) {
+      lines.push(
+        `⚠ A RENDER IS CURRENTLY RUNNING INSIDE BLENDER (state.json phase: ${phase}). Do NOT call ANY blender MCP tool right now — the call will queue behind the render, time out the bridge, and may corrupt scene.blend. Poll state.json (phase goes starting → rendering → complete) and exports/render_####.png every ~15s. Resume scene edits only once phase leaves {starting, rendering, recovering}.`,
+      );
+    }
     lines.push(
       `Brand assets (if any) were pushed to /root/assets/ on the GPU instance during provisioning. Load them with bpy.data.images.load('/root/assets/<filename>'). List available files with: import os; print(os.listdir('/root/assets')). DO NOT try to read from /workspace/brand/assets/ — that path is on the host, not the GPU.`,
     );

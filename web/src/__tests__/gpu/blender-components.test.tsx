@@ -16,6 +16,19 @@ import { tmpdir } from "node:os";
 import { LeasePill } from "@/app/app/(workflow)/blender/LeasePill";
 import { RenderPanel } from "@/app/app/(workflow)/blender/RenderPanel";
 import type { LeaseInfo } from "@/app/app/(workflow)/blender/types";
+import { readWorkspaceFileText } from "@/lib/docker";
+
+// Mock readWorkspaceFileText so the (now-async) prefill can read state.json
+// phase without hitting docker. Default returns no file (null); individual
+// tests override via mockReadWorkspaceFileText.
+vi.mock("@/lib/docker", () => ({
+  readWorkspaceFileText: vi.fn(async () => null),
+  execInContainer: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+  getContainerForUser: vi.fn(() => null),
+}));
+const mockReadWorkspaceFileText = vi.mocked(readWorkspaceFileText);
+// A minimal container row stub for the prefill signature.
+const ROW = { id: 1, user_id: 1, status: "ready", opencode_port: 0 } as never;
 
 // ── LeasePill ──────────────────────────────────────────────────────────────
 
@@ -286,7 +299,7 @@ describe("buildBlenderLeasePrefill", () => {
 
   it("returns empty string for an instance with no lease", async () => {
     const { buildBlenderLeasePrefill } = await import("@/lib/gpu/blender-prefill");
-    const text = buildBlenderLeasePrefill("x");
+    const text = await buildBlenderLeasePrefill(ROW, "x", "/workspace/blends/x");
     expect(text).toBe("");
   });
 
@@ -296,11 +309,33 @@ describe("buildBlenderLeasePrefill", () => {
       `INSERT INTO gpu_leases (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, last_activity)
        VALUES ('x', 1, 'ready', 500, 'RTX 4060', 0.07, '1.2.3.4', 12345, ?)`,
     ).run(Date.now());
+    mockReadWorkspaceFileText.mockResolvedValue(null); // no state.json → idle
 
     const { buildBlenderLeasePrefill } = await import("@/lib/gpu/blender-prefill");
-    const text = buildBlenderLeasePrefill("x");
+    const text = await buildBlenderLeasePrefill(ROW, "x", "/workspace/blends/x");
     expect(text).toContain("READY");
     expect(text).toContain("RTX 4060");
     expect(text).toContain("blender");
+    // No render in flight → no in-flight warning.
+    expect(text).not.toContain("RENDER IS CURRENTLY RUNNING");
+  });
+
+  it("warns the agent to stay off blender tools when state.json shows a render in flight", async () => {
+    const { db } = await import("@/lib/db");
+    db().prepare(
+      `INSERT INTO gpu_leases (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, last_activity)
+       VALUES ('x', 1, 'ready', 500, 'RTX 4060', 0.07, '1.2.3.4', 12345, ?)`,
+    ).run(Date.now());
+    mockReadWorkspaceFileText.mockResolvedValue(
+      JSON.stringify({ phase: "rendering", lastUpdated: new Date().toISOString() }),
+    );
+
+    const { buildBlenderLeasePrefill } = await import("@/lib/gpu/blender-prefill");
+    const text = await buildBlenderLeasePrefill(ROW, "x", "/workspace/blends/x");
+    // The hard in-flight warning must appear, naming the phase.
+    expect(text).toContain("RENDER IS CURRENTLY RUNNING");
+    expect(text).toContain("rendering");
+    // And the agent must be told to poll, not to touch tools.
+    expect(text).toContain("Do NOT call ANY blender MCP tool");
   });
 });

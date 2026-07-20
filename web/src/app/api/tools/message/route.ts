@@ -136,7 +136,7 @@ export async function POST(req: Request) {
     // knows whether blender tools are reachable. Empty for non-Blender lanes.
     const { buildBlenderLeasePrefill, isBlenderInstance } = await import("@/lib/gpu/blender-prefill");
     const blenderPrefill = isBlenderInstance(workflowInstanceId)
-      ? buildBlenderLeasePrefill(workflowInstanceId)
+      ? await buildBlenderLeasePrefill(row, workflowInstanceId, instance.folder)
       : "";
     const prefills = [automationPrefill, blenderPrefill, brandPrefill].filter(Boolean).join("\n\n");
     if (prefills) deliveredMessage = `${prefills}\n\n${message}`;

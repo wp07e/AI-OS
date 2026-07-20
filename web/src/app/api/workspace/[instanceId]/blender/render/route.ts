@@ -3,6 +3,8 @@ import { currentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { execInContainer, getContainerForUser } from "@/lib/docker";
 import { leaseManager } from "@/lib/gpu/lease-manager";
+import { promptAsync, getOrCreateSession, type SessionPrime } from "@/lib/opencode";
+import { getWorkflow } from "@/lib/workflows/registry";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
@@ -175,6 +177,35 @@ chmod +x '${wrapperPath}'`;
     return NextResponse.json(
       { error: "failed to launch render", detail: r.stderr.trim() || `exit ${r.code}` },
       { status: 500 },
+    );
+  }
+
+  // ── Notify the agent so it stays out of the way ──────────────────────────
+  // There is ONE Blender process: the user's Render button and the agent's MCP
+  // tools share the same single-threaded addon socket. If the agent "helps" by
+  // running its own render or issuing tool calls while this render runs, those
+  // calls queue behind the render, time out the bridge, and can corrupt the
+  // .blend. We fire a chat message (same pattern as video automate) telling the
+  // agent exactly what to do: poll state.json + exports/, touch nothing.
+  const nudgeMessage = `The user clicked "Render" in the UI. A final ${engine} render (${samples} samples, ${resolution}) is now running via the helper script (op:render) inside Blender. Do NOT call any blender MCP tools or trigger your own render — the render blocks Blender's single-threaded addon socket, so any tool call will queue behind it, time out the bridge, and can corrupt the .blend. Instead, just wait: poll state.json (phase will go starting → rendering → complete) and the renders gallery (exports/render_####.png) every ~15s, and report when it finishes. Resume scene edits only once phase returns to a non-busy state.`;
+
+  const def = getWorkflow("blender");
+  const prime: SessionPrime = {
+    folder: instance.folder,
+    skill: def?.skill ?? "blender",
+    sessionPrompt: def?.sessionPrompt,
+  };
+
+  try {
+    const sessionId = await getOrCreateSession(row, instanceId, prime);
+    await promptAsync(row.opencode_port, sessionId, nudgeMessage);
+  } catch (e) {
+    // Non-fatal: the render is already launched and state.json says "starting".
+    // The agent simply won't get the proactive nudge; the per-turn prefill still
+    // surfaces the in-flight phase on its next message.
+    console.warn(
+      `[blender/render] failed to notify agent for ${instanceId}:`,
+      e instanceof Error ? e.message : String(e),
     );
   }
 

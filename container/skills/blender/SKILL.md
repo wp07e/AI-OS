@@ -10,6 +10,14 @@ description: >
 
 # Blender Studio Automation
 
+⚠️ **There is ONE Blender process.** Your MCP tools and the user's "Render"
+button share its single-threaded addon socket (`127.0.0.1:9876`). Two renders
+on the same process corrupt `scene.blend` and hang the bridge. So: the helper
+script's `op:render` (the user's "Render" button) owns final renders — you NEVER
+trigger a Cycles render or a large EEVEE render yourself via MCP. When a render
+is running, the lease prefill will say `phase: rendering` and warn you to touch
+nothing; poll `state.json` + `exports/` and resume only once the phase clears.
+
 GPU acquisition, release, and recovery are **automatic** and owned by the host.
 You do NOT call vast.ai, SSH, or destroy anything. The lease prefill (silent,
 prepended to your messages) tells you the current GPU state.
