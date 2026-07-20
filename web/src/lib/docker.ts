@@ -435,12 +435,23 @@ function sleep(ms: number) {
  * Runs a command inside the user's ai-os container. Returns { code, stdout }.
  * Throws if docker itself fails to spawn (a non-zero exit code is returned,
  * not thrown — callers decide how to handle it).
+ *
+ * TEST SEAM — when `AIOS_TEST_MOCK_DOCKER=1` is set, returns a blanket success
+ * (see ./docker-mock.ts) so the booted dev server can service workflow
+ * create/delete and other docker-backed routes without a real `ai-os` container.
+ * Pairs with the vast mock (`AIOS_TEST_MOCK_VAST=1`) for full server-side
+ * coverage in Playwright runs.
  */
-export function execInContainer(
+export async function execInContainer(
   row: ContainerRow,
   command: string[],
   opts: { user?: string } = {},
 ): Promise<{ code: number; stdout: string; stderr: string }> {
+  if (process.env.AIOS_TEST_MOCK_DOCKER === "1") {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { mockExecInContainer } = require("./docker-mock");
+    return mockExecInContainer()(row, command, opts);
+  }
   return new Promise((resolveP, reject) => {
     const args = [
       "compose",

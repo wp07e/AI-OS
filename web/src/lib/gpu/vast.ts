@@ -486,8 +486,26 @@ export function createVastClient(baseTransport: Transport = defaultTransport): V
   };
 }
 
-/** A shared singleton client (uses the real CLI transport). */
-export const vast = createVastClient();
+/**
+ * A shared singleton client. Uses the real CLI transport in production.
+ *
+ * TEST SEAM — when `AIOS_TEST_MOCK_VAST=1` is set, the singleton is backed by
+ * `createMockVastClient()` (see ./vast-mock.ts): a deterministic in-memory
+ * implementation with configurable boot/destroy delays and failure injection.
+ * This lets the Next.js dev server (booted by Playwright) exercise the full
+ * server-side state machine without renting real GPUs. The flag is read ONCE
+ * at module load. Direct unit tests of vast.ts are unaffected (they construct
+ * `createVastClient(mockTransport)` directly).
+ */
+export const vast: VastClient =
+  process.env.AIOS_TEST_MOCK_VAST === "1"
+    ? (() => {
+        // Lazy require so production builds never parse the mock module.
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const { createMockVastClient } = require("./vast-mock");
+        return createMockVastClient();
+      })()
+    : createVastClient();
 
 /** Re-export the state type for convenience. */
 export type { InstanceState };

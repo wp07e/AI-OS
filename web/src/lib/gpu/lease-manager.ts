@@ -145,6 +145,17 @@ async function readOnstartScript(exec: ContainerExec, row: ContainerRow, image: 
 
 const inflight = new Map<string, Promise<unknown>>();
 
+/**
+ * Instances with a release in progress. Checked by syncTick, watchdogTick's
+ * checkAndRecover, and idleReaperTick BEFORE they call withLock — if set, they
+ * skip the instance entirely. This is the "private priority lane" for release:
+ * it never queues behind syncTick/watchdog in the withLock promise chain.
+ *
+ * Set by release() before writing state; cleared by the background release
+ * IIFE (manual) or the release function's finally block (non-manual) when done.
+ */
+const releasePending = new Set<string>();
+
 function withLock<T>(instanceId: string, fn: () => Promise<T>): Promise<T> {
   const prev = inflight.get(instanceId) ?? Promise.resolve();
   const next = prev.then(fn, fn);
@@ -904,34 +915,40 @@ __STATE_EOF__`;
       // `releasing` rows whose process was killed mid-destroy.
       const snapshot = { ...lease };
       void (async () => {
-        if (container) {
-          await saveSyncAndStopTunnel(snapshot, container).catch((e) =>
-            console.error(`[lease-manager] background sync/stop failed for ${instanceId}:`, (e as Error).message),
-          );
-          await writeWorkflowPhase(snapshot, container, "idle", { active: null }).catch(() => {});
-        }
-        if (vastId) {
-          await destroyInstanceWithRetry(vastId).catch(() => {});
-        }
-        if (sshKeyId) {
-          await vast.deleteSshKey(sshKeyId).catch(() => {});
-        }
-        // Flip to the terminal `destroyed` state and null the instance fields.
-        // Re-read in case a re-acquire reset the row in the meantime; only
-        // finalize if we still own it (state=releasing + manually_released=1).
-        // This guards against clobbering a freshly re-acquired lease — the same
-        // snapshot-stomping hazard syncDown guards against (see the comment
-        // there).
-        const cur = getLease(instanceId);
-        if (cur && cur.manually_released === 1 && cur.state === "releasing") {
-          upsertLease({
-            ...cur,
-            state: "destroyed",
-            ssh_host: null,
-            ssh_port: null,
-            vast_id: null,
-            ssh_key_id: null,
-          });
+        try {
+          if (container) {
+            await saveSyncAndStopTunnel(snapshot, container).catch((e) =>
+              console.error(`[lease-manager] background sync/stop failed for ${instanceId}:`, (e as Error).message),
+            );
+            await writeWorkflowPhase(snapshot, container, "idle", { active: null }).catch(() => {});
+          }
+          if (vastId) {
+            await destroyInstanceWithRetry(vastId).catch(() => {});
+          }
+          if (sshKeyId) {
+            await vast.deleteSshKey(sshKeyId).catch(() => {});
+          }
+          // Flip to the terminal `destroyed` state and null the instance fields.
+          // Re-read in case a re-acquire reset the row in the meantime; only
+          // finalize if we still own it (state=releasing + manually_released=1).
+          // This guards against clobbering a freshly re-acquired lease — the same
+          // snapshot-stomping hazard syncDown guards against (see the comment
+          // there).
+          const cur = getLease(instanceId);
+          if (cur && cur.manually_released === 1 && cur.state === "releasing") {
+            upsertLease({
+              ...cur,
+              state: "destroyed",
+              ssh_host: null,
+              ssh_port: null,
+              vast_id: null,
+              ssh_key_id: null,
+            });
+          }
+        } finally {
+          // Clear the priority-lane flag so the reaper can force-complete this
+          // row if the background IIFE crashed or was killed mid-destroy.
+          releasePending.delete(instanceId);
         }
       })().catch((e) => console.error(`[lease-manager] background release failed for ${instanceId}:`, (e as Error).message));
       return;
@@ -977,6 +994,10 @@ __STATE_EOF__`;
       .prepare("SELECT * FROM gpu_leases WHERE state IN ('ready','provisioning','recovering')")
       .all() as LeaseRow[];
     for (const lease of active) {
+      // Priority lane: skip if a release is in progress. The release owns the
+      // instance exclusively — the watchdog must not probe the tunnel or try to
+      // re-establish it while the release is stopping/destroying.
+      if (releasePending.has(lease.instance_id)) continue;
       // Serialize per-instance.
       await withLock(lease.instance_id, async () => checkAndRecover(lease)).catch((e) =>
         console.error(`[watchdog] ${lease.instance_id}:`, (e as Error).message),
@@ -1004,6 +1025,10 @@ __STATE_EOF__`;
       )
       .all(now() - STALE_RELEASING_MS) as LeaseRow[];
     for (const lease of staleReleasing) {
+      // Priority lane: if the release's background IIFE is still running (flag
+      // is set), skip — it will complete the release. Only force-complete if
+      // the IIFE crashed (flag is NOT set but the row is still `releasing`).
+      if (releasePending.has(lease.instance_id)) continue;
       await withLock(lease.instance_id, async () => {
         const cur = getLease(lease.instance_id);
         if (!cur || cur.state !== "releasing") return; // resolved since the query
@@ -1040,6 +1065,10 @@ __STATE_EOF__`;
       .prepare("SELECT * FROM gpu_leases WHERE state = 'destroyed' AND vast_id IS NOT NULL")
       .all() as LeaseRow[];
     for (const lease of unfinishedDestroyed) {
+      // Priority lane: skip if the release's background IIFE is still running
+      // (it will null vast_id when it completes). Only force-complete if the
+      // IIFE crashed leaving vast_id set.
+      if (releasePending.has(lease.instance_id)) continue;
       await withLock(lease.instance_id, async () => {
         const cur = getLease(lease.instance_id);
         if (!cur || cur.state !== "destroyed" || !cur.vast_id) return;
@@ -1181,13 +1210,22 @@ __STATE_EOF__`;
       .all() as LeaseRow[];
     for (const lease of leases) {
       if (now() - lease.last_activity > idleTimeoutMs) {
+        // Skip if a release is already in progress (e.g. user clicked Release
+        // at the same moment the idle timer fired).
+        if (releasePending.has(lease.instance_id)) continue;
         console.log(`[idle-reaper] releasing idle lease ${lease.instance_id} (idle ${Math.round((now() - lease.last_activity) / 1000)}s)`);
-        // Run under the per-instance lock. releaseImpl does long async work
-        // (save + sync + destroy); without the lock, a concurrent watchdog tick
-        // could reProvision the same instance mid-release, creating a second GPU.
-        await withLock(lease.instance_id, () => releaseImpl(lease.instance_id, "idle-timeout")).catch((e) =>
-          console.error(`[idle-reaper] release failed:`, (e as Error).message),
-        );
+        // Use the priority lane: set the flag so syncTick/watchdog skip this
+        // instance, then call releaseImpl directly (no withLock — the flag is
+        // our serialization). The non-manual path runs synchronously, so clear
+        // the flag in finally when it completes.
+        releasePending.add(lease.instance_id);
+        try {
+          await releaseImpl(lease.instance_id, "idle-timeout");
+        } catch (e) {
+          console.error(`[idle-reaper] release failed:`, (e as Error).message);
+        } finally {
+          releasePending.delete(lease.instance_id);
+        }
       }
     }
   }
@@ -1199,11 +1237,15 @@ __STATE_EOF__`;
       .prepare("SELECT * FROM gpu_leases WHERE state = 'ready'")
       .all() as LeaseRow[];
     for (const lease of leases) {
+      // Priority lane: skip if a release is in progress. The release's background
+      // IIFE handles save/sync/stop/destroy independently — syncTick must not
+      // queue behind it (or hold the lock while it does SSH that could hang).
+      if (releasePending.has(lease.instance_id)) continue;
       const container = db()
         .prepare("SELECT * FROM containers WHERE user_id = ?")
         .get(lease.user_id) as ContainerRow | undefined;
       if (container) {
-        
+
         await withLock(lease.instance_id, () => syncDown(lease, container)).catch(() => {});
       }
     }
@@ -1312,7 +1354,54 @@ __STATE_EOF__`;
 
   return {
     acquire: (opts) => withLock(opts.instanceId, () => acquireImpl(opts)),
-    release: (instanceId, reason) => withLock(instanceId, () => releaseImpl(instanceId, reason)),
+    /**
+     * Release a GPU lease with PRIORITY over all other per-instance operations.
+     *
+     * This does NOT go through withLock — it writes the transitional state
+     * synchronously (an atomic SQL statement that doesn't need serialization
+     * with syncTick/watchdog) and starts the background save/sync/stop/destroy
+     * work independently. The `releasePending` flag tells syncTick,
+     * watchdogTick's checkAndRecover, idleReaperTick, and reapReleases to SKIP
+     * this instance before they even try to acquire the lock. This means:
+     *
+     *   - Release is never queued behind a hung syncTick SSH command.
+     *   - Once release writes `state: "releasing"`, no periodic operation
+     *     touches the instance again — the background IIFE owns it exclusively.
+     *   - Nothing can stop the release once it starts.
+     *
+     * For the manual path (the "Release GPU" button / DELETE /lease): writes
+     * `releasing` synchronously, starts a detached background IIFE for the slow
+     * work (save/sync/stop/destroy), and returns immediately. The `releasePending`
+     * flag is cleared by the background IIFE's finally block when it completes
+     * (or crashes — the reaper will force-complete on the next tick).
+     *
+     * For the non-manual path (idle-timeout / lane-deleted): writes `releasing`
+     * synchronously, then runs save/sync/stop/destroy synchronously (the route
+     * handler awaits this). The `releasePending` flag is cleared in the finally
+     * block when the synchronous work completes.
+     */
+    release: async (instanceId: string, reason: string = "manual") => {
+      // Idempotency: if a release is already in progress, don't start a second one.
+      if (releasePending.has(instanceId)) return;
+      releasePending.add(instanceId);
+      try {
+        await releaseImpl(instanceId, reason);
+      } catch (e) {
+        // releaseImpl threw before starting the background IIFE (manual path) or
+        // before completing (non-manual path). Clear the flag so the reaper can
+        // retry and syncTick/watchdog can resume normal operation.
+        console.error(`[lease-manager] release failed for ${instanceId}:`, (e as Error).message);
+        releasePending.delete(instanceId);
+        return;
+      }
+      // For the non-manual path (synchronous), releaseImpl has completed all work
+      // — clear the flag now. For the manual path, releaseImpl started a background
+      // IIFE and returned; the IIFE's finally block clears the flag when it
+      // completes (or crashes — the reaper force-completes on the next tick).
+      if (reason !== "manual") {
+        releasePending.delete(instanceId);
+      }
+    },
     touch: (instanceId) => {
       db().prepare("UPDATE gpu_leases SET last_activity = ? WHERE instance_id = ?").run(now(), instanceId);
     },
@@ -1345,4 +1434,28 @@ export function leaseManager(): LeaseManager {
     _manager.start();
   }
   return _manager;
+}
+
+/**
+ * TEST SEAM — never call from production code.
+ *
+ * Integration tests that drive the real route handlers (which call
+ * `leaseManager()`) need to inject a manager built with a mocked vast client
+ * and exec/fileOps. Without this seam, the routes would always reach the real
+ * host singleton (which shells out to the `vastai` CLI and docker). This is the
+ * only way to assert server-side state-machine behavior through the real API
+ * layer without renting real GPUs.
+ *
+ * `mgr.start()` is the caller's responsibility (background loops are off by
+ * default in tests that call methods directly; enabled where a test exercises
+ * the watchdog/reaper). Always pair with `_clearLeaseManagerForTests()` in
+ * afterEach to avoid leaking the mock across files.
+ */
+export function _setLeaseManagerForTests(mgr: LeaseManager): void {
+  _manager = mgr;
+}
+
+/** TEST SEAM — clears any manager injected by `_setLeaseManagerForTests`. */
+export function _clearLeaseManagerForTests(): void {
+  _manager = null;
 }

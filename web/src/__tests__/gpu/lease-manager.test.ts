@@ -396,7 +396,16 @@ describe("lease manager: resume", () => {
     const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
     const blendScp = calls.find((c: unknown[]) => {
       const cmd = c[1] as string[];
-      return cmd[0] === "bash" && cmd[2]?.includes("scene.blend") && cmd[2]?.includes("/root/blender/");
+      // Look for an actual file-push command (scp/cp/cat) that references the
+      // .blend path. Exclude the polyhaven/sketchfab re-assert save command
+      // (which mentions scene.blend in bpy.ops.wm.save_as_mainfile but is a
+      // Blender socket save, not a file push).
+      return (
+        cmd[0] === "bash" &&
+        cmd[2]?.includes("scene.blend") &&
+        cmd[2]?.includes("/root/blender/") &&
+        !cmd[2]?.includes("blendermcp_use_")
+      );
     });
     expect(blendScp).toBeUndefined();
   });

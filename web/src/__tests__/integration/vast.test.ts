@@ -24,6 +24,9 @@
 
 import { describe, it, expect, beforeAll } from "vitest";
 import { spawn } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve } from "node:path";
 import {
   vast,
   DEFAULT_MAX_DPH,
@@ -172,4 +175,80 @@ describe("vast integration (real API)", () => {
       expect(await vast.getInstance(id)).toBeNull();
     },
   );
+});
+
+// ── Lease-manager-driven real-GPU lifecycle ────────────────────────────────
+//
+// These tests drive the REAL lease manager (the host singleton's factory) with
+// the REAL vast client but mocked container-exec/fileOps. The mock exec
+// simulates the SSH keygen + tunnel probes the manager runs inside the host
+// container; the actual GPU work happens on the real rented instance. This is
+// the closest automated coverage to the manual "open Blender lane, wait for
+// ready, release" flow — without booting next dev.
+//
+// Gated on VAST_API_KEY (auto-skip when absent). Run manually before promoting:
+//   VAST_API_KEY=... npm run test:integration
+
+describe("lease manager integration (real GPUs via leaseManager)", () => {
+  itReal("acquire reaches ready; release destroys the real instance", async () => {
+    const { db, _resetDbForTests } = await import("@/lib/db");
+    const { createLeaseManager } = await import("@/lib/gpu/lease-manager");
+    const {
+      mockExec,
+      mockFileOps,
+      fakeContainer,
+    } = await import("@/__tests__/gpu/_helpers");
+    const tmpDir = mkdtempSync(resolve(tmpdir(), "aios-lease-int-"));
+    process.env.DB_PATH = resolve(tmpDir, "test.db");
+    _resetDbForTests();
+    db();
+    // Wipe any leftover rows from sibling test files in the same worker.
+    db().prepare("DELETE FROM gpu_leases").run();
+    db().prepare("DELETE FROM workflow_instances").run();
+    db().prepare("DELETE FROM containers").run();
+    db().prepare("DELETE FROM users").run();
+    db().prepare(
+      "INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 't', 'x', 0, 0)",
+    ).run();
+    db().prepare(
+      "INSERT INTO containers (user_id, project_name, opencode_port, oauth_port, relay_port, container_id, status, created_at) VALUES (1, 'p', 1, 2, 3, 'c', 'ready', 0)",
+    ).run();
+    db().prepare(
+      "INSERT INTO workflow_instances (id, user_id, workflow_type, title, folder) VALUES ('real-1', 1, 'blender', 'Real', '/workspace/blends/real-1')",
+    ).run();
+
+    const mgr = createLeaseManager({
+      vast, // REAL vast client
+      exec: mockExec(),
+      fileOps: mockFileOps(),
+      idleTimeoutMs: 60_000,
+    });
+    mgr.start();
+    try {
+      const lease = await mgr.acquire({
+        instanceId: "real-1",
+        userId: 1,
+        container: fakeContainer(),
+        resume: false,
+      });
+      expect(lease.state).toBe("ready");
+      expect(lease.vast_id).toBeTruthy();
+      const realId = lease.vast_id!;
+
+      await mgr.release("real-1", "test");
+
+      // The real instance must be gone (destroy confirmed by vast.ai).
+      expect(await vast.getInstance(realId)).toBeNull();
+    } finally {
+      mgr.stop();
+      // Defensive: ensure no orphan instance bills. If the row still has a
+      // vast_id, destroy it directly.
+      const row = db().prepare("SELECT vast_id FROM gpu_leases WHERE instance_id = ?").get("real-1") as
+        | { vast_id: number | null }
+        | undefined;
+      if (row?.vast_id) {
+        await vast.destroyInstance(row.vast_id).catch(() => {});
+      }
+    }
+  });
 });
