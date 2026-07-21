@@ -132,12 +132,29 @@ function mockExec(): ContainerExec & { responses: Record<string, string>; setFil
       return { code: 0, stdout: "", stderr: "" };
     }
     // pkill of autossh/ssh tunnel (stopTunnel) — mock success.
-    if (bashCmd.includes("pkill")) {
+    // NOTE: must come before the ssh-root@ branch below because the SSH probe
+    // commands for restartBlender also contain "pkill -f blender".
+    if (bashCmd.includes("pkill") && !bashCmd.includes("root@")) {
       return { code: 0, stdout: "", stderr: "" };
     }
-    // Tunnel liveness probe (/dev/tcp — bash builtin, not nc which isn't
-    // installed in the node:*-slim image). Respects setTunnelAlive().
-    if (bashCmd.includes("/dev/tcp/127.0.0.1")) {
+    // restartBlender SSH commands: sentinel removal, pkill blender, relaunch,
+    // and the on-instance Python socket probe. The on-instance probe always
+    // succeeds after relaunch — it runs directly on the GPU instance (not
+    // through the tunnel), so tunnelAlive (which models the tunnel state)
+    // doesn't apply here. The restart itself makes Blender come back.
+    // MUST come before the get_scene_info check below so the on-instance SSH
+    // probe isn't swallowed by the tunnel-state-aware probe.
+    if (bashCmd.includes("ssh ") && bashCmd.includes("root@")) {
+      if (bashCmd.includes("get_scene_info") || bashCmd.includes("touch /root/.blender-mcp-ready")) {
+        return { code: 0, stdout: "ok\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    // Tunnel liveness probe. Two forms:
+    //  - Legacy: /dev/tcp (bash builtin). Respects setTunnelAlive().
+    //  - Current: Python socket protocol probe (sends get_scene_info through
+    //    the tunnel, checks for a response). Respects setTunnelAlive().
+    if (bashCmd.includes("/dev/tcp/127.0.0.1") || bashCmd.includes("get_scene_info")) {
       return tunnelAlive
         ? { code: 0, stdout: "ok\n", stderr: "" }
         : { code: 1, stdout: "dead\n", stderr: "" };
@@ -1205,10 +1222,11 @@ describe("lease manager: watchdog tunnel probe retry", () => {
     expect(killCall).toBeUndefined();
   });
 
-  it("restarts autossh after 3 consecutive probe failures (dead tunnel)", async () => {
+  it("restarts Blender in-place after 3 consecutive probe failures (dead Blender)", async () => {
     const vast = mockVast();
     const exec = mockExec();
-    // Make the tunnel probe fail every time.
+    // Make the tunnel probe fail every time (simulates a crashed Blender behind
+    // a live SSH tunnel + instance).
     exec.setTunnelAlive(false);
     const mgr = createLeaseManager({
       vast,
@@ -1222,26 +1240,36 @@ describe("lease manager: watchdog tunnel probe retry", () => {
 
     mgr.start();
     // The probe retry does 3 attempts with 1s delays (~2s total) before
-    // declaring dead. Wait long enough for one full probe cycle + restart.
+    // declaring dead, then restartBlender runs (SSH kill + relaunch + poll).
+    // Wait long enough for one full probe cycle + restart.
     await new Promise((r) => setTimeout(r, 4000));
     mgr.stop();
     // Drain any in-flight tick so it can't touch the next test's seeded row.
     await new Promise((r) => setTimeout(r, 30));
 
     const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
-    // stopTunnel (pkill autossh) was called — the watchdog restarted the tunnel.
-    const killCall = calls.find((c: unknown[]) => {
+    // restartBlender SSHed into the instance to kill stale Blender.
+    const killBlenderCall = calls.find((c: unknown[]) => {
       const cmd = c[1] as string[];
-      return cmd[0] === "bash" && cmd[2]?.includes("pkill") && cmd[2]?.includes("autossh");
+      return cmd[0] === "bash" && cmd[2]?.includes("ssh ") && cmd[2]?.includes("pkill -f blender");
     });
-    expect(killCall).toBeDefined();
-    // startTunnel (autossh) was called — at least once from the restart
-    // (acquire didn't run, so the only autossh call is from the watchdog restart).
+    expect(killBlenderCall).toBeDefined();
+    // restartBlender SSHed in to relaunch Blender with the startup script.
+    const relaunchCall = calls.find((c: unknown[]) => {
+      const cmd = c[1] as string[];
+      return cmd[0] === "bash" && cmd[2]?.includes("start_blender_mcp.py");
+    });
+    expect(relaunchCall).toBeDefined();
+    // The tunnel was restarted as the final step of restartBlender.
     const autosshCalls = calls.filter((c: unknown[]) => {
       const cmd = c[1] as string[];
       return cmd[0] === "bash" && cmd[2]?.includes("autossh");
     });
     expect(autosshCalls.length).toBeGreaterThanOrEqual(1);
+    // The lease transitioned through recovering → back to ready (the mock's
+    // SSH commands succeed, so restartBlender returns true).
+    const lease = mgr.get("inst-1");
+    expect(lease?.state).toBe("ready");
   });
 });
 

@@ -326,6 +326,15 @@ export interface LeaseManager {
    * silently if no lease is active or the push fails.
    */
   pushBrandAssets(instanceId: string): Promise<void>;
+
+  /**
+   * Restart Blender in-place on the GPU instance (agent-callable). Used when
+   * the Blender process has crashed (segfault) but the vast.ai instance is
+   * still running. SSHes in, kills stale Blender, relaunches with the saved
+   * scene.blend, and polls until the add-on socket responds. Returns {ok:true}
+   * on success, {ok:false, error} on failure.
+   */
+  restartBlender(instanceId: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManager {
@@ -602,6 +611,78 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
       ["bash", "-lc", `pkill -f "autossh.*${BLENDER_PORT}:" 2>/dev/null; sleep 0.2; pkill -f "ssh.*-L.*${BLENDER_PORT}:" 2>/dev/null; true`],
       { user: APP_USER },
     ).catch(() => {});
+  }
+
+  /**
+   * Restart Blender in-place on the GPU instance when the process has crashed
+   * (segfault) but the instance itself is still running and SSH-reachable.
+   *
+   * This is the lightweight recovery path between "tunnel dead → restart autossh"
+   * and "instance stopped → startInstance/reProvision": it SSHes into the running
+   * instance, kills any stale Blender process, and relaunches Blender with the
+   * saved scene.blend (preserving the agent's last-saved work). No vast.ai
+   * destroy, no re-provision, no .blend re-push. Cheapest possible recovery.
+   *
+   * Returns true if the Blender add-on socket came back up within the timeout.
+   */
+  async function restartBlender(
+    container: ContainerRow,
+    target: { host: string; port: number },
+    timeoutMs: number = Number(process.env.GPU_RESTART_TIMEOUT_MS ?? 2 * 60_000),
+  ): Promise<boolean> {
+    const pollMs = Number(process.env.GPU_POLL_INTERVAL_MS ?? 5000);
+    const sshOpts = `ssh -i ${SSH_KEY_PATH} -p ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
+    const ssh = (cmd: string) =>
+      exec(container, ["bash", "-lc", `${sshOpts} root@${target.host} '${cmd.replace(/'/g, "'\\''")}' 2>&1`], {
+        user: APP_USER,
+      }).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+
+    // 1. Clear the stale readiness sentinel so waitForBlenderSocket won't see a
+    //    false-positive from the previous Blender session.
+    await ssh("rm -f /root/.blender-mcp-ready");
+
+    // 2. Kill any stale Blender process. Wait for it to actually die.
+    await ssh("pkill -f blender 2>/dev/null; sleep 2");
+
+    // 3. Relaunch Blender. Load the saved scene.blend if it exists so the
+    //    agent's last-saved work is preserved (start_blender_mcp.py will
+    //    re-enable the addon and restart the socket server on the loaded scene).
+    const relaunchCmd = [
+      "if [ -f /root/blender/scene.blend ]; then",
+      "  BLENDER_FILE=/root/blender/scene.blend",
+      "else",
+      "  BLENDER_FILE=",
+      "fi",
+      "DISPLAY=:99 BLENDER_PORT=9876 nohup /opt/blender/blender $BLENDER_FILE --python /root/start_blender_mcp.py >>/root/onstart.log 2>&1 &",
+    ].join("; ");
+    await ssh(relaunchCmd);
+
+    // 4. Poll the add-on socket directly on the GPU instance (not the tunnel —
+    //    the tunnel is a separate concern). The socket accepting a real
+    //    get_scene_info request means Blender + addon are alive, not just that
+    //    a port is open.
+    const deadline = Date.now() + timeoutMs;
+    const probeCmd =
+      'python3 -c "' +
+      "import socket, json; " +
+      "s = socket.socket(); s.settimeout(3); " +
+      "s.connect(('127.0.0.1', 9876)); " +
+      "s.sendall(json.dumps({'type':'get_scene_info','params':{}}).encode() + b'\\n'); " +
+      "d = s.recv(4096); print('ok' if d else 'empty'); s.close()" +
+      '" 2>/dev/null';
+    while (Date.now() < deadline) {
+      const probe = await ssh(probeCmd);
+      if (probe.stdout.includes("ok")) {
+        // 5. Restore the sentinel so waitForBlenderSocket stays consistent.
+        await ssh("touch /root/.blender-mcp-ready");
+        // 6. Restart the tunnel to clear any stale SSH forward state.
+        await stopTunnel(container);
+        await startTunnel(container, target);
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
+    }
+    return false;
   }
 
   // ── Sync ──────────────────────────────────────────────────────────────────
@@ -1191,32 +1272,62 @@ __STATE_EOF__`;
       .prepare("SELECT * FROM containers WHERE user_id = ?")
       .get(lease.user_id) as ContainerRow | undefined;
 
-    // ── RUNNING: check tunnel health ──────────────────────────────────────
+    // ── RUNNING: check Blender + tunnel health ──────────────────────────────
     if (inst && inst.cur_state === "running") {
       // Only check tunnel for leases that are ready (not still provisioning).
       if (sshHost && sshPort && container && current.state === "ready") {
-        // Probe with retry: 3 attempts, 1s apart. A single transient
-        // failure (port not yet bound after autossh -f forks, brief exec
-        // hiccup) should not trigger a kill+restart cycle. autossh handles
-        // tunnel-level reconnection itself; this watchdog only intervenes if
-        // autossh itself has died.
+        // Protocol-level probe: send a real get_scene_info request through the
+        // tunnel and check for a response. The old /dev/tcp probe only checked
+        // whether the SSH tunnel's local forward accepted a TCP connection —
+        // which it does even when Blender behind it has segfaulted (SSH accepts
+        // locally, then gets RST from the remote, but the probe already returned
+        // "ok"). This probe catches a dead Blender process behind a live tunnel.
         //
-        // CRITICAL: uses /dev/tcp (bash builtin) NOT nc — the node:*-slim
-        // image does NOT include netcat. The old `nc -z` probe was a silent
-        // no-op (command not found, swallowed by 2>/dev/null), so it ALWAYS
-        // returned "dead" regardless of whether the port was actually open.
+        // 3 attempts, 1s apart: a single transient failure (addon busy with a
+        // render, brief socket hiccup) must not trigger a restart cycle.
+        const probeCmd =
+          `python3 -c "` +
+          `import socket, json; ` +
+          `s = socket.socket(); s.settimeout(3); ` +
+          `s.connect(('127.0.0.1', ${BLENDER_PORT})); ` +
+          `s.sendall(json.dumps({'type':'get_scene_info','params':{}}).encode() + b'\\n'); ` +
+          `d = s.recv(4096); print('ok' if d else 'dead'); s.close()" 2>/dev/null`;
         let alive = false;
         for (let attempt = 0; attempt < 3 && !alive; attempt++) {
           if (attempt > 0) await new Promise((r) => setTimeout(r, 1000));
-          const probe = await exec(
-            container,
-            ["bash", "-lc", `(echo > /dev/tcp/127.0.0.1/${BLENDER_PORT}) 2>/dev/null && echo ok || echo dead`],
-            { user: APP_USER },
-          ).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
+          const probe = await exec(container, ["bash", "-lc", `${probeCmd} && echo ok || echo dead`], {
+            user: APP_USER,
+          }).catch(() => ({ code: 1, stdout: "dead", stderr: "" }));
           if (probe.stdout.includes("ok")) alive = true;
         }
         if (!alive) {
-          console.log(`[watchdog] ${lease.instance_id}: tunnel dead after 3 probes, restarting autossh`);
+          // Blender is dead but the instance is still running. Restart Blender
+          // in-place — much cheaper than destroying + re-provisioning the whole
+          // instance, and the agent's saved scene.blend is preserved.
+          console.log(`[watchdog] ${lease.instance_id}: Blender socket dead (instance running), restarting Blender in-place`);
+          upsertLease({ ...current, state: "recovering" });
+          await writeWorkflowPhase(current, container, "recovering", {
+            active: { op: "restart", label: "Blender crashed — restarting…" },
+          });
+          const restarted = await restartBlender(container, { host: sshHost, port: sshPort });
+          if (restarted) {
+            const fresh = getLease(lease.instance_id);
+            if (fresh && fresh.state !== "releasing" && fresh.state !== "destroyed") {
+              upsertLease({ ...fresh, state: "ready", last_activity: now(), last_error: null });
+              await writeWorkflowPhase(fresh, container, "gpu_ready");
+              console.log(`[watchdog] ${lease.instance_id}: Blender restarted in-place`);
+            }
+            return;
+          }
+          // In-place restart failed. Fall back to restarting the tunnel (the
+          // old recovery path) — if that doesn't help, the next watchdog tick
+          // will find the port still dead and the instance may need a full
+          // re-provision via the non-running branch below.
+          console.error(`[watchdog] ${lease.instance_id}: in-place Blender restart failed, restarting tunnel as fallback`);
+          const fresh = getLease(lease.instance_id);
+          if (fresh && fresh.state === "recovering") {
+            upsertLease({ ...fresh, state: "ready", last_error: "Blender restart failed; tunnel restarted as fallback" });
+          }
           await stopTunnel(container);
           await startTunnel(container, { host: sshHost, port: sshPort });
         }
@@ -1665,6 +1776,47 @@ __STATE_EOF__`;
       while (timers.length) clearInterval(timers.pop());
     },
     pushBrandAssets: pushBrandAssetsImpl,
+    /**
+     * Restart Blender in-place on the GPU instance (agent-callable). SSHes into
+     * the running instance, kills stale Blender, relaunches with the saved
+     * scene.blend, and polls until the add-on socket responds. The agent calls
+     * this via POST /api/workspace/<id>/blender/restart when it detects a dead
+     * Blender. See restartBlender() above for details.
+     */
+    restartBlender: async (instanceId: string): Promise<{ ok: boolean; error?: string }> => {
+      const lease = getLease(instanceId);
+      if (!lease) return { ok: false, error: "no lease for this instance" };
+      if (lease.state !== "ready" && lease.state !== "recovering") {
+        return { ok: false, error: `lease is ${lease.state}, expected ready/recovering` };
+      }
+      if (!lease.ssh_host || !lease.ssh_port) return { ok: false, error: "no SSH endpoint on the lease" };
+      const container = db()
+        .prepare("SELECT * FROM containers WHERE user_id = ?")
+        .get(lease.user_id) as ContainerRow | undefined;
+      if (!container) return { ok: false, error: "agent container not found" };
+      return withLock(instanceId, async () => {
+        const current = getLease(instanceId);
+        if (!current) return { ok: false, error: "lease disappeared" };
+        upsertLease({ ...current, state: "recovering" });
+        await writeWorkflowPhase(current, container, "recovering", {
+          active: { op: "restart", label: "Restarting Blender…" },
+        });
+        const ok = await restartBlender(container, { host: lease.ssh_host!, port: lease.ssh_port! });
+        if (!ok) {
+          const fresh = getLease(instanceId);
+          if (fresh && fresh.state === "recovering") {
+            upsertLease({ ...fresh, state: "ready", last_error: "Blender restart failed" });
+          }
+          return { ok: false, error: "Blender add-on socket did not come back up" };
+        }
+        const fresh = getLease(instanceId);
+        if (fresh && fresh.state !== "releasing" && fresh.state !== "destroyed") {
+          upsertLease({ ...fresh, state: "ready", last_activity: now(), last_error: null });
+          await writeWorkflowPhase(fresh, container, "gpu_ready");
+        }
+        return { ok: true };
+      });
+    },
   };
 }
 

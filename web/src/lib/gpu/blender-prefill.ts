@@ -97,6 +97,9 @@ export async function buildBlenderLeasePrefill(
     lines.push(
       `There is ONE Blender process — your MCP tools and the user's "Render" button share its single-threaded addon socket. Final high-quality renders are owned by the helper script (op:"render"), triggered by the user clicking "Render" in the UI. NEVER trigger a Cycles render or large EEVEE render yourself via MCP: it blocks the socket, times out the bridge, and can corrupt scene.blend. Your only job on a render is to poll state.json + exports/render_*.png every ~15s and report when it finishes.`,
     );
+    lines.push(
+      `If a blender tool call returns "Connection refused", "Connection reset by peer", or the MCP server reports Blender unreachable, the Blender process may have crashed (the GPU instance stays running). A host-side watchdog auto-restarts Blender within ~30s and restores your last-saved scene. You can also trigger a restart yourself: POST /api/workspace/<id>/blender/restart — wait ~30s, then retry. Your scene.blend is preserved across restarts (loaded from the last save). Do NOT try to SSH to the GPU instance yourself.`,
+    );
     if (phase && RENDER_BUSY_PHASES.has(phase)) {
       lines.push(
         `⚠ A RENDER IS CURRENTLY RUNNING INSIDE BLENDER (state.json phase: ${phase}). Do NOT call ANY blender MCP tool right now — the call will queue behind the render, time out the bridge, and may corrupt scene.blend. Poll state.json (phase goes starting → rendering → complete) and exports/render_####.png every ~15s. Resume scene edits only once phase leaves {starting, rendering, recovering}.`,

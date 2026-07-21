@@ -170,12 +170,29 @@ export function mockExec(): ContainerExec & {
       return { code: 0, stdout: "", stderr: "" };
     }
     // pkill of autossh/ssh tunnel (stopTunnel) — mock success.
-    if (bashCmd.includes("pkill")) {
+    // NOTE: must come before the ssh-root@ branch below because the SSH probe
+    // commands for restartBlender also contain "pkill -f blender".
+    if (bashCmd.includes("pkill") && !bashCmd.includes("root@")) {
       return { code: 0, stdout: "", stderr: "" };
     }
-    // Tunnel liveness probe (/dev/tcp — bash builtin, not nc which isn't
-    // installed in the node:*-slim image). Respects setTunnelAlive().
-    if (bashCmd.includes("/dev/tcp/127.0.0.1")) {
+    // restartBlender SSH commands: sentinel removal, pkill blender, relaunch,
+    // and the on-instance Python socket probe. The on-instance probe always
+    // succeeds after relaunch — it runs directly on the GPU instance (not
+    // through the tunnel), so tunnelAlive (which models the tunnel state)
+    // doesn't apply here. The restart itself makes Blender come back.
+    // MUST come before the get_scene_info check below so the on-instance SSH
+    // probe isn't swallowed by the tunnel-state-aware probe.
+    if (bashCmd.includes("ssh ") && bashCmd.includes("root@")) {
+      if (bashCmd.includes("get_scene_info") || bashCmd.includes("touch /root/.blender-mcp-ready")) {
+        return { code: 0, stdout: "ok\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    }
+    // Tunnel liveness probe. Two forms:
+    //  - Legacy: /dev/tcp (bash builtin). Respects setTunnelAlive().
+    //  - Current: Python socket protocol probe (sends get_scene_info through
+    //    the tunnel, checks for a response). Respects setTunnelAlive().
+    if (bashCmd.includes("/dev/tcp/127.0.0.1") || bashCmd.includes("get_scene_info")) {
       return tunnelAlive
         ? { code: 0, stdout: "ok\n", stderr: "" }
         : { code: 1, stdout: "dead\n", stderr: "" };
