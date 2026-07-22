@@ -76,28 +76,47 @@ def _blender_socket_reachable(timeout: float = 5.0) -> bool:
 def _send_to_blender(code: str, timeout: float = 30.0) -> dict:
     """Send an execute_code request to the blender-mcp socket, return the response.
 
-    The blender-mcp add-on speaks a simple JSON-over-TCP protocol. This is a
-    minimal client sufficient for save + headless render commands — NOT a full
-    MCP client (the agent uses the real blender-mcp MCP server for interactive
-    work). Returns {"success": bool, "result": str}.
+    The blender-mcp add-on speaks a JSON-over-TCP protocol with PERSISTENT
+    connections: it sends the response and then loops back to recv() waiting for
+    the next command — it does NOT close the socket after responding. So we must
+    read until the accumulated bytes parse as a complete JSON object, then close
+    our end ourselves. Reading until EOF (the previous approach) deadlocks
+    forever because the addon never closes the connection, causing the 600s
+    timeout to fire and kill the process (the "pipeline killed by signal 15"
+    crash). This read-until-JSON-parses pattern matches the MCP server's own
+    receive_full_response implementation.
+
+    Returns {"success": bool, "result": str}.
     """
     payload = json.dumps({"type": "execute_code", "params": {"code": code}}) + "\n"
     try:
         with socket.create_connection((BLENDER_HOST, BLENDER_PORT), timeout=timeout) as sock:
             sock.settimeout(timeout)
             sock.sendall(payload.encode("utf-8"))
+            # Read until the accumulated bytes form a complete JSON object, then
+            # close our end. This is the fix for the persistent-connection
+            # deadlock: the addon never closes the socket, so reading until EOF
+            # blocks forever.
             chunks: list[bytes] = []
             while True:
                 data = sock.recv(4096)
                 if not data:
+                    # Connection closed by addon (shouldn't happen normally,
+                    # but handle gracefully).
                     break
                 chunks.append(data)
+                try:
+                    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+                    if raw:
+                        result = json.loads(raw)
+                        return result
+                except json.JSONDecodeError:
+                    # Incomplete JSON — need more data. Keep reading.
+                    continue
+            # Reached only if connection closed before a complete response.
             raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
-            try:
-                return json.loads(raw) if raw else {"success": False, "result": "empty response"}
-            except json.JSONDecodeError:
-                return {"success": True, "result": raw}
-    except OSError as e:
+            return {"success": False, "result": f"incomplete response: {raw[:200]}"}
+    except (OSError, socket.timeout) as e:
         return {"success": False, "result": f"socket error: {e}"}
 
 
@@ -169,14 +188,18 @@ bpy.ops.render.render(animation=True, write_still=True)
 print('RENDER_DONE')
 """
     resp = _send_to_blender(code, timeout=600.0)
-    if not resp.get("success"):
-        S.write_state(folder, "error", errors=[f"render failed: {resp.get('result', 'unknown')}"])
+    if resp.get("status") == "error":
+        S.write_state(folder, "error", errors=[f"render failed: {resp.get('message', 'unknown')}"])
+        sys.exit(1)
+    if not resp.get("success") and not resp.get("status") == "success":
+        S.write_state(folder, "error", errors=[f"render failed: {resp.get('result', resp.get('message', 'unknown'))}"])
         sys.exit(1)
 
     S.write_state(
         folder,
         "complete",
         active=None,
+        errors=[],
         renders=[{
             "id": f"render-{int(time.time())}",
             "label": f"{engine} {samples}s {resolution}",
@@ -212,28 +235,37 @@ def op_preview(folder: str, request: dict) -> None:
 import bpy, os
 scene = bpy.context.scene
 scene.render.engine = 'BLENDER_EEVEE_NEXT'
-scene.eeveee.taa_render_samples = {samples}
+scene.eevee.taa_render_samples = {samples}
 scene.render.resolution_x = {res_x}
 scene.render.resolution_y = {res_y}
 scene.render.image_settings.file_format = 'PNG'
 os.makedirs('{RENDER_DIR_REMOTE}', exist_ok=True)
 scene.render.filepath = '{RENDER_DIR_REMOTE}/preview.png'
-scene.frame_start = 1
-scene.frame_end = 1
-bpy.ops.render.render(animation=True, write_still=True)
+# Use animation=False (single still frame) so Blender writes exactly to the
+# filepath without appending a frame number suffix (animation=True produces
+# preview.png0001.png, which the host sync doesn't find at exports/preview.png).
+bpy.ops.render.render(write_still=True)
 print('PREVIEW_DONE')
 """
     resp = _send_to_blender(code, timeout=600.0)
-    if not resp.get("success"):
-        S.write_state(folder, "error", errors=[f"preview failed: {resp.get('result', 'unknown')}"])
+    # The addon returns {"status": "success", "result": {...}} on success, or
+    # {"status": "error", "message": "..."} on error. _send_to_blender returns
+    # {"success": False, "result": "..."} on socket failure. Check both paths.
+    if resp.get("status") == "error":
+        S.write_state(folder, "error", errors=[f"preview failed: {resp.get('message', 'unknown')}"])
+        sys.exit(1)
+    if not resp.get("success") and not resp.get("status") == "success":
+        S.write_state(folder, "error", errors=[f"preview failed: {resp.get('result', resp.get('message', 'unknown'))}"])
         sys.exit(1)
 
     # Return to the idle-ready phase (not "complete", which the UI treats as a
-    # final render). The renders[] entry is what the canvas displays.
+    # final render). Clear errors so stale messages from prior failed runs don't
+    # linger in the canvas. The renders[] entry is what the canvas displays.
     S.write_state(
         folder,
         "gpu_ready",
         active=None,
+        errors=[],
         renders=[{
             "id": "preview",
             "label": "Preview",
