@@ -202,9 +202,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 #
 # Versioning: we use the wp07e fork of blender-mcp
 # (https://github.com/wp07e/blender-mcp) which carries the viewport-screenshot
-# bytes-over-socket fix on the fix/viewport-bytes branch. The fork's addon.py is
-# fetched at build time; the MCP server (blender_mcp package) is installed from
-# the same fork via `uvx --from git+...` so both sides of the fix stay in sync.
+# bytes-over-socket fix on the fix/viewport-bytes branch. The addon.py is
+# VENDORED in this repo at container/gpu/addon.py (at the SHA below) and COPY'd
+# in — it is no longer curl'd at build time. We vendor it because the addon
+# carries our scene-diff interception (automatic before/after manifest diff on
+# every mutating command, plus transform_apply + unparented-part guards) that
+# makes "inspect after every step" structural rather than advisory. The MCP
+# server (blender_mcp package) is still installed from the same fork via the
+# tarball below so the wire protocol stays in sync.
 # Pin to a SHA for reproducibility (the default below); set
 # BLENDER_MCP_REF=fix/viewport-bytes to track the branch HEAD instead (raw.gh
 # accepts branch names directly, so the SHA-resolution branch below is only an
@@ -215,19 +220,11 @@ ARG BLENDER_MCP_REF=5519e5550023dc2f3ecacd2df1baee92e143777f
 # Set to "latest-4.5" to auto-resolve, or pin to a specific version like "4.5.11".
 ARG BLENDER_VERSION=4.5.11
 ENV GPU_DIR=${APP_DIR}/gpu
-# Fetch the addon at the resolved ref. We expand `main` to a concrete SHA first
-# so the RUN layer is cache-keyed on a stable ref; a moving `main` would bust
-# the cache unpredictably. When BLENDER_MCP_REF is already a SHA, this is a
-# no-op passthrough.
-RUN mkdir -p ${GPU_DIR} \
- && REF="${BLENDER_MCP_REF}" \
- && if [ "$REF" = "main" ]; then \
-      REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
-        | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
-    fi \
- && echo "blender-mcp addon ref: $REF" \
- && curl -fsSL "https://raw.githubusercontent.com/wp07e/blender-mcp/${REF}/addon.py" \
-      -o ${GPU_DIR}/addon.py
+# Vendor the addon from the repo. We expand `main` to a concrete SHA only for
+# the MCP-server tarball fetch below (cache stability); the addon itself is a
+# committed file so it needs no network fetch here.
+RUN mkdir -p ${GPU_DIR}
+COPY gpu/addon.py ${GPU_DIR}/addon.py
 COPY gpu/onstart.sh ${GPU_DIR}/onstart.sh
 COPY gpu/onstart-baked.sh ${GPU_DIR}/onstart-baked.sh
 RUN chmod +x ${GPU_DIR}/onstart.sh ${GPU_DIR}/onstart-baked.sh
