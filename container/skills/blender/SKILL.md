@@ -32,6 +32,148 @@ prepended to your messages) tells you the current GPU state.
 | **Final batch render** | The render route → helper script | The user clicks "Render" in the UI; the script runs `op:"render"` |
 | **GPU lifecycle** (acquire/release/recover) | The host lease manager | Automatic — never touch it |
 
+## Modeling methodology (READ BEFORE MODELING)
+
+This section is your **foundational methodology for any modeling task** — read it
+before you create or modify geometry. It exists to prevent the two recurring
+failure modes: **detached/disconnected parts** on multi-part models, and
+**runaway iteration loops that crash Blender**. Follow it every time; do not
+improvise past it.
+
+### Step 0 — Skills-first check (MANDATORY, before anything else)
+
+Before planning or touching any geometry, you MUST check the installed technique
+skills and read the ones that match the request:
+
+1. Run `ls /workspace/skills/` to see all 94 technique skills.
+2. Match the request to the relevant skill(s) and read each one's `SKILL.md`.
+3. State in your report which skills you loaded.
+4. Do NOT begin modeling until this is done.
+
+Common mappings:
+
+| Request type | Load this skill first |
+|---|---|
+| Creature / insect / animal / monster | `creature-artist` (has an explicit **Insectoid: Arthropod → segmented body, jointed legs** row — use it for ants, beetles, etc.) |
+| General modeling / blockout / cleanup | `blender-modeler` |
+| Parametric antennae, legs, cables, segmented parts | `procedural-modeling` |
+| Machinery / robots / vehicles | `hard-surface` |
+| Sculpted organic detail (scales, pores) | `sculpting` |
+| Retopologizing a sculpt | `retopology` |
+| Rigging for posing/animation | `rigging` |
+| Hair / fur | `hair-groom` |
+| Materials / shaders | `materials` |
+| Lighting | `lighting` |
+
+These skills contain exact anatomy tables, modifier-stack recipes, and parameter
+cheatsheets built by specialists. **Skipping them is the #1 cause of detached
+parts and failed builds** — they tell you, for example, that an insect needs a
+segmented body with jointed legs parented to a thorax, so you don't build free-
+floating parts by accident.
+
+### Step 1 — Plan before operating
+
+Before any Blender operation:
+1. Decompose the task into the smallest logical single-step actions.
+2. Identify symmetry opportunities (model one side, Mirror the other) and
+   reusable/linked geometry (Array, linked duplicates).
+3. Decide the assembly hierarchy up front (see the assembly protocol below).
+4. Identify existing geometry that can be reused or modified.
+
+**Do not execute any Blender operation during planning.**
+
+### Step 2 — Execute exactly ONE step per tool call, then inspect
+
+Perform only one logical modeling action per step. Good single steps:
+- `Create the Thorax mesh`
+- `Add a Mirror modifier to Leg_L_Front`
+- `Extrude the antenna base`
+- `Parent the wing to the Thorax`
+
+Bad (multi-step in one call): "create both legs and the abdomen", "model the
+head and apply modifiers at the same time".
+
+After every step, **inspect** (never assume success): correct object(s) exist
+with expected names, object count is right, transforms/origin sensible, parent
+hierarchy correct, modifiers live and in order, mesh manifold where expected, no
+floating/duplicate geometry, scene back in **Object Mode**.
+
+If the step succeeded → next planned step. If not → **stop, diagnose, do not
+immediately retry** (see retry caps below).
+
+### Multi-part assembly protocol (PREVENTS DETACHED PARTS)
+
+This is the recipe that stops legs, heads, and wings from floating off the body.
+For any model with more than one part:
+
+1. **Create a single root empty (`AssemblyRoot`) as the FIRST step.** Every body
+   part will be parented to it (or to its anatomical parent, which is itself
+   parented to the root).
+2. **Build each segment and parent it immediately** — `Head` → root, `Thorax` →
+   root, `Abdomen` → root, each `Leg_*` → `Thorax`, each `Antenna_*` → `Head`.
+   **Never leave a part unparented.** Parenting is part of "creating" a part, not
+   an afterthought.
+3. **Model one side and mirror** for symmetrical pairs. Create `Leg_L_Front`,
+   add a Mirror modifier (or linked duplicate), producing `Leg_R_Front`. Do not
+   freehand both sides independently — they'll diverge.
+4. **Verify connectivity after assembly.** Dump the parent tree and per-object
+   vertex counts via `execute_code`:
+   ```python
+   import bpy
+   for o in bpy.data.objects:
+       parent = o.parent.name if o.parent else "(NONE)"
+       v = len(o.data.vertices) if o.type == 'MESH' else '-'
+       print(f"{o.name:24} parent={parent:16} verts={v}")
+   ```
+   Any `parent=(NONE)` part that should be attached, or any `verts=0` mesh, is a
+   defect — fix it before continuing.
+5. **Run the vision check** (the "Verify your work" section below) on the
+   **assembled whole**, not per-part, to catch floating/misaligned parts.
+
+**A part is not "done" until it is parented and verified connected.**
+
+### Retry & iteration caps (PREVENTS INFINITE-LOOP CRASHES)
+
+- **Per step:** maximum **2 retries** for the same logical step. After two
+  failures, **STOP**. Report what failed, why, and the smallest recovery option.
+  Never enter retry loops or emit near-identical failing operations.
+- **Global hard cap: ~25 MCP tool calls for a single modeling task.** If you hit
+  the cap, the build is not converging — **STOP**. Do not keep improvising: that
+  is what crashes Blender. Instead: save (`bpy.ops.wm.save_as_mainfile`), update
+  `state.json` to `{"phase": "needs_input", ...}`, append a note to `memory.md`,
+  and hand back to the user with a concise summary of what's done and what's
+  stuck. Let the user redirect.
+
+### Scene-integrity & state-hygiene rules
+
+- **Never leave the scene in Edit Mode.** Before and after every op, confirm
+  Object Mode and explicitly set the active object/selection — never rely on
+  leftover state from a previous step. Leaving Edit Mode or dirty selection is a
+  failure.
+- **Never** delete/rename/move user objects, reset the scene, apply modifiers,
+  recreate existing correct geometry, leave temp objects/empties (except
+  `AssemblyRoot`), or touch cameras/lights/world/render settings unless asked.
+- **Prefer non-destructive workflows:** keep modifiers live (Subdivision Surface,
+  Mirror, Array); prefer modifying/reusing existing geometry over creating new.
+- **Descriptive names always:** `Head`, `Thorax`, `Abdomen`, `Leg_L_Front`,
+  `Antenna_L`. Never `Cube`, `Cube.001`, `Object`, `Sphere`.
+- **Symmetry first:** model one side, mirror the other.
+- **Make the smallest possible deterministic change** each step; preserve all
+  existing user work.
+
+### Completion criteria (a model is not done until ALL are true)
+
+- [ ] Requested geometry exists and is named correctly
+- [ ] **Every part is parented** — no unparented/floating parts (verified by the
+      parent-tree dump)
+- [ ] Symmetrical pairs are mirrored, not freehanded
+- [ ] Mesh vertex counts are non-zero (no corrupted/empty meshes)
+- [ ] Hierarchy and origins are sensible
+- [ ] **The assembled whole passes the vision check** (no detached parts, camera
+      framed correctly, no blank regions)
+- [ ] No retry loops occurred; you stayed under the ~25-call cap
+- [ ] Scene is in Object Mode, fully editable and recoverable
+
 ## GPU lease states
 
 The lease prefill tells you which state you're in:

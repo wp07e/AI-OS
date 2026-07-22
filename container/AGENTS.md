@@ -99,11 +99,18 @@ designed Instagram carousel from a brief.
 94 specialized Blender skills from the [blender-skills](https://github.com/arjun988/blender-skills)
 pack are installed in `/workspace/skills/`. Each is a `SKILL.md` file (with
 optional `references/`) covering a specific technique: animation, archviz,
-materials, lighting, character rigging, compositing, geometry nodes, and more.
-When tackling a complex Blender task, `ls /workspace/skills/` to find a matching
-skill and read its `SKILL.md` before proceeding — they contain expert-level
-setup guides, parameter cheatsheets, and workflow shortcuts that save
-trial-and-error.
+materials, lighting, character rigging, compositing, geometry nodes, creature
+modeling, and more.
+
+**For any Blender modeling task, checking these skills is mandatory Step 0 —
+before planning or creating any geometry.** Run `ls /workspace/skills/`, match
+the request to the relevant skill(s), and read each `SKILL.md`. They contain
+expert-level anatomy tables, modifier-stack recipes, and parameter cheatsheets;
+skipping them is the leading cause of detached parts and failed builds. The full
+modeling methodology (skills-first check, one-step-at-a-time, multi-part
+assembly protocol, retry/iteration caps) lives in
+`/workspace/skills/blender/SKILL.md` under "Modeling methodology" — read and
+follow it.
 
 ## Summary of rules
 
