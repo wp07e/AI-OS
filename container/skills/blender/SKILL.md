@@ -132,6 +132,78 @@ For any model with more than one part:
 
 **A part is not "done" until it is parented and verified connected.**
 
+### Modeling technique footguns (general-purpose)
+
+These are the low-level Blender technique traps that burn first renders on
+**any** subject — creatures, characters, vehicles, props. They are not in the
+specialist technique skills, so they live here as your baseline guardrails.
+
+**1. Transform application — `transform_apply` zeroes locations.**
+
+The bare `bpy.ops.object.transform_apply()` defaults to `location=True,
+rotation=True, scale=True`. Applied to a parented object, it **zeros every
+segment's location to (0,0,0)** — head, thorax, and abdomen all collapse to the
+origin and the vision system sees one blob. This is the single most common
+cause of a collapsed first build.
+
+- **Use `apply_scale_safe(object_name)`** via the blender MCP tools. It applies
+  scale only (`location=False, rotation=False`) and verifies the location
+  survived.
+- If you must use `execute_code`, the ONLY safe form is:
+  ```python
+  bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+  ```
+- **Never** call `transform_apply()` with no keyword args, and never on a
+  parented object with `location=True`.
+
+**2. Camera setup — never hand-calculate rotation.**
+
+Hand-calculating camera rotation Euler angles consistently fails (the trig is
+wrong) and wastes a full render cycle discovering the camera points the wrong
+way. **Every** render needs a camera, so this is subject-independent.
+
+- **Use `aim_camera_at(camera_name, target_name, lens=50)`** via the blender
+  MCP tools. It creates a Damped Track constraint so the camera always looks at
+  the target regardless of where either is moved.
+- **Set up and verify the camera BEFORE building detailed geometry.** A
+  `get_viewport_screenshot` costs nothing and catches framing errors 20 minutes
+  earlier than a full preview render.
+- When a new camera appears, the scene-diff output will nudge you toward
+  `aim_camera_at` — heed it.
+
+**3. Viewport-first verification.**
+
+After the first 2–3 parts are assembled (before any detail work), call
+`get_viewport_screenshot` to visually confirm framing and assembly. This is the
+cheapest verification step available — do **not** wait for the first preview
+render to discover a camera or assembly problem. The longer a defect goes
+unseen, the more geometry is built on top of it.
+
+**4. Connected vs separate geometry — a judgment call, not a rule.**
+
+- **Organic subjects where parts should blend** (creature bodies, character
+  torsos, slime): build as a **single connected mesh** via Edit Mode extrusion +
+  scaling, with bridge edge loops between segments. Separate UV spheres always
+  look disjointed — the gaps read as "detached floating parts" to the vision
+  system even when correctly parented.
+- **Subjects with distinct rigid parts** (machinery, vehicles, armored
+  creatures): separate meshes + the assembly protocol above are correct — the
+  gaps are intentional.
+- **Organic appendages** (legs, antennae, tentacles, vines, cables): prefer
+  **Bezier curves with a circular bevel** over raw cylinders. Curves give
+  smooth, natural bends with fewer vertices and articulated joints. Create a
+  Bezier curve, set its `bevel_depth` for thickness, and convert to mesh only
+  if you need to sculpt detail.
+
+**5. Subdivision Surface — levels and support loops.**
+
+When using Subdivision Surface on a body form:
+- Use viewport level 2 / render level 3.
+- Add **support edge loops** (loop cut, Ctrl+R) at segment boundaries so the
+  form holds its silhouette under subdivision.
+- Bare subdivision on separate primitives still looks like separate primitives
+  — subdivide a *connected* mesh for the organic-form benefit to register.
+
 ### Retry & iteration caps (PREVENTS INFINITE-LOOP CRASHES)
 
 - **Per step:** maximum **2 retries** for the same logical step. After two
@@ -169,6 +241,8 @@ For any model with more than one part:
 - [ ] Symmetrical pairs are mirrored, not freehanded
 - [ ] Mesh vertex counts are non-zero (no corrupted/empty meshes)
 - [ ] Hierarchy and origins are sensible
+- [ ] **Camera framed via `aim_camera_at` and verified with
+      `get_viewport_screenshot`** (never hand-calculated rotation)
 - [ ] **The assembled whole passes the vision check** (no detached parts, camera
       framed correctly, no blank regions)
 - [ ] No retry loops occurred; you stayed under the ~25-call cap
@@ -199,7 +273,11 @@ tight loop.
 2. **Drive scene work via blender tools.** Create objects, apply materials, load
    Poly Haven HDRIs/textures/models, set up cameras — all through the `blender`
    MCP tools. Use `execute_code` for anything the specialized tools don't cover
-   (it runs arbitrary `bpy` Python in Blender).
+   (it runs arbitrary `bpy` Python in Blender). **Prefer purpose-built tools
+   over `execute_code` for footgun-prone ops:** `aim_camera_at` for camera
+   framing (never hand-calculate rotation) and `apply_scale_safe` for baking
+   scale (never `transform_apply()` which zeroes locations). See "Modeling
+   technique footguns" above.
 
 3. **Save frequently.** After any meaningful change, call `execute_code` with:
    ```python
@@ -211,7 +289,7 @@ tight loop.
 
 4. **Produce a quick preview after every meaningful change** so the user sees
    visual feedback in the canvas immediately. **Trigger it via the preview
-   route**, NOT `execute_code`:
+   route**, NOT `execute_code` and **NEVER by invoking run.py yourself**:
    ```
    POST /api/workspace/<id>/blender/preview
    body: {"settings": {"samples": 16, "resolution_x": 960, "resolution_y": 540}}
@@ -221,10 +299,19 @@ tight loop.
    fire-and-forget. Do NOT run the preview via `execute_code`
    (`bpy.ops.render.render`) on anything but a trivial scene — `execute_code`
    goes through the MCP bridge and is capped at **~120s**, so complex scenes
-   time out and force you down to an unusably small 640x360. The preview route
-   has no such ceiling. After POSTing, poll `state.json` (phase goes
-   `starting` → `rendering` → `gpu_ready`) and the renders[] preview entry; the
-   host syncs `exports/preview.png` from the GPU within ~5s.
+   time out and force you down to an unusably small 640x360.
+
+   **Do NOT invoke `run.py` yourself** (e.g. `uv run --project /app/blender
+   python run.py ...`) via `execute_code` or a shell. Doing so blocks the single
+   Blender socket the MCP bridge shares, hits the ~120s shell/bridge timeout,
+   gets SIGTERM'd (signal 15), and triggers a Blender watchdog restart — exactly
+   the crash loop you want to avoid. The HTTP preview route is the ONLY correct
+   path: it background-launches run.py (fire-and-forget) with the 600s budget
+   and never blocks your socket.
+
+   The preview route has no such ceiling. After POSTing, poll `state.json`
+   (phase goes `starting` → `rendering` → `gpu_ready`) and the renders[] preview
+   entry; the host syncs `exports/preview.png` from the GPU within ~5s.
 
    The `execute_code` preview (below) is a fallback ONLY for tiny scenes where
    its 120s limit can't bind:
@@ -232,7 +319,7 @@ tight loop.
    import bpy, os
    scene = bpy.context.scene
    scene.render.engine = 'BLENDER_EEVEE_NEXT'
-   scene.eeveee.taa_render_samples = 16
+   scene.eevee.taa_render_samples = 16
    scene.render.resolution_x = 960
    scene.render.resolution_y = 540
    scene.render.image_settings.file_format = 'PNG'
@@ -407,7 +494,7 @@ checks:
    import bpy, os
    scene = bpy.context.scene
    scene.render.engine = 'BLENDER_EEVEE_NEXT'
-   scene.eeveee.taa_render_samples = 64      # higher quality for verification
+   scene.eevee.taa_render_samples = 64      # higher quality for verification
    scene.render.resolution_x = 1280          # larger, so small defects show
    scene.render.resolution_y = 720
    scene.render.image_settings.file_format = 'PNG'

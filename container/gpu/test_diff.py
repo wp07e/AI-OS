@@ -131,6 +131,25 @@ check("execute_code" not in S._READ_ONLY_COMMANDS, "execute_code treated as muta
 check("get_scene_info" in S._READ_ONLY_COMMANDS, "get_scene_info treated as read-only")
 check("get_viewport_screenshot" in S._READ_ONLY_COMMANDS, "screenshot treated as read-only")
 
+# 5a. New CAMERA object triggers the aim_camera_at nudge — fires at exactly the
+#     moment a camera appears, pointing the agent at the safe aiming tool
+#     instead of letting it hand-calculate rotation.
+bpy.data.objects = []
+before = s._scene_manifest()
+bpy.data.objects.append(FakeObj("Camera", (4.0, -2.5, 2.0), type_="CAMERA"))
+diff = s._format_scene_diff(before)
+print("\n--- diff (new camera) ---\n" + diff + "\n------")
+check("Camera" in diff and "CAMERA" in diff, "new camera appears in diff")
+check("aim_camera_at" in diff, "camera nudge points to aim_camera_at tool")
+check("get_viewport_screenshot" in diff, "camera nudge suggests viewport verification")
+check("NEVER hand-calculate" in diff, "camera nudge warns against hand-calculated rotation")
+
+# 5b. New safe-guardrail tools must be MUTATING so they inherit the scene-diff
+#     safety net (like execute_code). A read-only classification would skip the
+#     before/after diff, hiding any transform regressions they cause.
+check("aim_camera_at" not in S._READ_ONLY_COMMANDS, "aim_camera_at treated as mutating")
+check("apply_scale_safe" not in S._READ_ONLY_COMMANDS, "apply_scale_safe treated as mutating")
+
 # 6. CRITICAL: the diff must land under the "result" key of the execute_code
 #    response, because the blender-mcp MCP server reads ONLY result.get("result")
 #    when surfacing the tool output to the agent. Earlier versions put it under

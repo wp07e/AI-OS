@@ -1039,6 +1039,32 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
    * into the workflow state the canvas polls, so the viewport doesn't stay
    * stuck on a stale phase from a dead render process.
    */
+
+  /** Phases where a render (or bootstrap) is actively using Blender's socket. */
+  const RENDER_BUSY_PHASES = new Set(["starting", "rendering", "recovering"]);
+
+  /**
+   * Read the workflow state.json's phase field from the container. Returns
+   * null if the file is missing, malformed, or unreadable. Used by the
+   * watchdog to skip liveness probes during active renders (when Blender's
+   * main thread is blocked by bpy.ops.render.render and can't respond to
+   * probes — even a server-thread ping would add unnecessary socket traffic
+   * during a render).
+   */
+  async function readWorkflowPhase(
+    container: ContainerRow,
+    instanceId: string,
+  ): Promise<string | null> {
+    const folder = `/workspace/blends/${instanceId}`;
+    const result = await exec(
+      container,
+      ["bash", "-lc", `python3 -c "import json; s=json.load(open('${folder}/state.json')); print(s.get('phase',''))" 2>/dev/null`],
+      { user: APP_USER },
+    ).catch(() => ({ code: 1, stdout: "", stderr: "" }));
+    const phase = result.stdout.trim();
+    return phase || null;
+  }
+
   async function writeWorkflowPhase(
     lease: LeaseRow,
     container: ContainerRow,
@@ -1611,21 +1637,35 @@ __STATE_EOF__`;
     if (inst && inst.cur_state === "running") {
       // Only check tunnel for leases that are ready (not still provisioning).
       if (sshHost && sshPort && container && current.state === "ready") {
-        // Protocol-level probe: send a real get_scene_info request through the
-        // tunnel and check for a response. The old /dev/tcp probe only checked
-        // whether the SSH tunnel's local forward accepted a TCP connection —
-        // which it does even when Blender behind it has segfaulted (SSH accepts
-        // locally, then gets RST from the remote, but the probe already returned
-        // "ok"). This probe catches a dead Blender process behind a live tunnel.
+        // Skip the liveness probe entirely when a render/preview is in flight.
+        // Even though the ping handler responds from the server thread (and
+        // would survive a render), probing during a render adds unnecessary
+        // socket traffic that could contend with the render's socket usage.
+        // The state.json phase tells us when Blender is busy rendering.
+        const wfPhase = await readWorkflowPhase(container, current.instance_id).catch(() => null);
+        if (wfPhase && RENDER_BUSY_PHASES.has(wfPhase)) {
+          // Blender is rendering — skip this probe cycle. The next tick (10s
+          // later) will check again; renders rarely take more than 2-3 ticks.
+          return;
+        }
+
+        // Protocol-level probe: send a lightweight 'ping' through the tunnel.
+        // The ping handler responds from the addon's SERVER THREAD (not Blender's
+        // main thread), so it gets an instant response even during a render
+        // (bpy.ops.render.render blocks the main thread, but the server thread
+        // stays alive). The old probe used get_scene_info which is dispatched
+        // onto the main thread via bpy.app.timers.register — during a render that
+        // timer never fires, the probe times out, and the watchdog kills Blender
+        // mid-render. The ping avoids that false-positive.
         //
-        // 3 attempts, 1s apart: a single transient failure (addon busy with a
-        // render, brief socket hiccup) must not trigger a restart cycle.
+        // 3 attempts, 1s apart: a single transient failure (brief socket hiccup)
+        // must not trigger a restart cycle.
         const probeCmd =
           `python3 -c "` +
           `import socket, json; ` +
           `s = socket.socket(); s.settimeout(3); ` +
           `s.connect(('127.0.0.1', ${BLENDER_PORT})); ` +
-          `s.sendall(json.dumps({'type':'get_scene_info','params':{}}).encode() + b'\\n'); ` +
+          `s.sendall(json.dumps({'type':'ping','params':{}}).encode() + b'\\n'); ` +
           `d = s.recv(4096); print('ok' if d else 'dead'); s.close()" 2>/dev/null`;
         let alive = false;
         for (let attempt = 0; attempt < 3 && !alive; attempt++) {

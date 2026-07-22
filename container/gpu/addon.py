@@ -214,6 +214,24 @@ class BlenderMCPServer:
                         command = json.loads(buffer.decode('utf-8'))
                         buffer = b''
 
+                        # ── Lightweight ping: respond from the SERVER thread,
+                        # NOT the main thread. This is critical: the watchdog
+                        # probes every 10s with a 3s timeout. If Blender is
+                        # rendering (bpy.ops.render.render blocks the main
+                        # thread), a get_scene_info probe scheduled on the
+                        # main thread can't be answered, the watchdog thinks
+                        # Blender is dead, and kills it mid-render. A ping
+                        # that responds from the server thread (which is alive
+                        # even during renders) lets the watchdog distinguish
+                        # "busy rendering" from "dead."
+                        if command.get("type") == "ping":
+                            try:
+                                resp = json.dumps({"status": "success", "result": "pong"})
+                                client.sendall(resp.encode('utf-8'))
+                            except:
+                                pass
+                            continue
+
                         # Execute command in Blender's main thread
                         def execute_wrapper():
                             try:
@@ -356,6 +374,16 @@ class BlenderMCPServer:
                     vwarn = " ⚠ ZERO VERTICES (corrupted/invisible)" if info.get("verts", 0) == 0 else ""
                     nowarn = " ⚠ UNPARENTED — will float; parent it to the assembly root" if info.get("parent") is None else ""
                     lines.append(f"  + {name} (mesh, verts={info.get('verts')}, {tag}){vwarn}{nowarn}")
+                elif info.get("type") == "CAMERA":
+                    # Cameras need aiming. Hand-calculating rotation Euler angles
+                    # consistently fails and wastes a render cycle on a mis-framed
+                    # shot — nudge toward the aim_camera_at tool at the exact
+                    # moment a camera appears, then a viewport grab to verify.
+                    lines.append(
+                        f"  + {name} (CAMERA) → use aim_camera_at(\"{name}\", <target>) "
+                        f"to frame it, then get_viewport_screenshot to verify. "
+                        f"NEVER hand-calculate camera rotation."
+                    )
                 else:
                     lines.append(f"  + {name} ({info.get('type')})")
 
@@ -414,6 +442,8 @@ class BlenderMCPServer:
             "get_hyper3d_status": self.get_hyper3d_status,
             "get_sketchfab_status": self.get_sketchfab_status,
             "get_hunyuan3d_status": self.get_hunyuan3d_status,
+            "aim_camera_at": self.aim_camera_at,
+            "apply_scale_safe": self.apply_scale_safe,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -535,6 +565,104 @@ class BlenderMCPServer:
             return scene_info
         except Exception as e:
             print(f"Error in get_scene_info: {str(e)}")
+            traceback.print_exc()
+            return {"error": str(e)}
+
+    def aim_camera_at(self, camera_name, target_name, lens=50):
+        """Point a camera at a target via a DAMPED_TRACK constraint.
+
+        This is the structural fix for the recurring "camera pointing the wrong
+        way" failure: agents hand-calculate camera rotation Euler angles, the
+        trig fails, and a full render cycle is wasted on a mis-framed shot. A
+        Damped Track constraint makes the camera always look at the target
+        regardless of where either object is, so framing is correct by
+        construction. Existing TRACK_TO/DAMPED_TRACK constraints on the camera
+        are removed first to avoid conflicts.
+        """
+        try:
+            camera = bpy.data.objects.get(camera_name)
+            if camera is None:
+                return {"error": f"Camera object '{camera_name}' not found"}
+            if camera.type != 'CAMERA':
+                return {"error": f"Object '{camera_name}' is a {camera.type}, not a CAMERA"}
+            target = bpy.data.objects.get(target_name)
+            if target is None:
+                return {"error": f"Target object '{target_name}' not found"}
+
+            # Set focal length.
+            camera.data.lens = float(lens)
+
+            # Remove any existing aim constraints to avoid stacking/conflicts.
+            for c in list(camera.constraints):
+                if c.type in ('TRACK_TO', 'DAMPED_TRACK'):
+                    camera.constraints.remove(c)
+
+            # Damped Track aims the camera's local -Z (the lens direction) at
+            # the target. Less snappy than TRACK_TO but won't flip on the pole.
+            con = camera.constraints.new(type='DAMPED_TRACK')
+            con.name = "AimAt_Target"
+            con.target = target
+            con.track_axis = 'TRACK_NEGATIVE_Z'
+
+            # Make the camera the active object + ensure Object Mode so the
+            # constraint evaluates immediately for a viewport screenshot.
+            bpy.context.view_layer.objects.active = camera
+            if bpy.context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+            print(f"Camera '{camera_name}' aimed at '{target_name}' (lens={lens}mm)")
+            return {
+                "camera": camera_name,
+                "target": target_name,
+                "lens": float(lens),
+                "constraint": "DAMPED_TRACK",
+            }
+        except Exception as e:
+            print(f"Error in aim_camera_at: {str(e)}")
+            traceback.print_exc()
+            return {"error": str(e)}
+
+    def apply_scale_safe(self, object_name):
+        """Apply (bake) an object's scale into its mesh WITHOUT zeroing location.
+
+        The bare bpy.ops.object.transform_apply() defaults to location=True,
+        rotation=True, scale=True — so it zeroes every parented segment's
+        location to the origin. That is the #1 cause of collapsed multi-part
+        models (head/thorax/abdomen all stack at (0,0,0) and the vision system
+        sees one blob). This method applies ONLY scale, preserving location and
+        rotation as live transforms, and verifies the location survived.
+        """
+        try:
+            obj = bpy.data.objects.get(object_name)
+            if obj is None:
+                return {"error": f"Object '{object_name}' not found"}
+
+            before_loc = (float(obj.location.x), float(obj.location.y), float(obj.location.z))
+
+            # transform_apply must run with the object selected+active in Object
+            # Mode, or it silently applies to nothing (or the wrong object).
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            bpy.context.view_layer.objects.active = obj
+            if bpy.context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+
+            # The safe form: location=False, rotation=False so neither is baked.
+            bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+
+            after_loc = (float(obj.location.x), float(obj.location.y), float(obj.location.z))
+            loc_match = all(abs(a - b) < 1e-6 for a, b in zip(before_loc, after_loc))
+
+            print(f"Scale applied to '{object_name}', location preserved: {loc_match}")
+            return {
+                "object": object_name,
+                "applied_scale": True,
+                "location_preserved": loc_match,
+                "before_location": list(before_loc),
+                "after_location": list(after_loc),
+            }
+        except Exception as e:
+            print(f"Error in apply_scale_safe: {str(e)}")
             traceback.print_exc()
             return {"error": str(e)}
 

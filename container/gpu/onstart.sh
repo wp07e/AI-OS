@@ -153,12 +153,33 @@ BLENDER_CONFIG_ROOT="/root/.config/blender/${BLENDER_MAJOR}.${BLENDER_MINOR}"
 ADDONS_DIR="$BLENDER_CONFIG_ROOT/scripts/addons"
 mkdir -p "$ADDONS_DIR"
 
-if [ ! -f "$ADDONS_DIR/blender_mcp.py" ]; then
-  log "installing blender-mcp add-on as single file (ref ${ADDON_REF})..."
+# Install the addon from the SCP'd source. The lease manager SCPs the patched
+# /app/gpu/addon.py onto the instance, but that SCP happens in bringInstanceOnline
+# AFTER vast.ai boots the instance and kicks off this onstart script — so there is
+# a RACE: at this point in onstart the file may not have landed yet. We wait for
+# it (up to 90s) so we install the PATCHED addon (with scene-diff interception),
+# not the unpatched upstream GitHub copy. Only fall back to GitHub if the SCP
+# truly never arrives (e.g. the host died), and warn loudly that the patch is
+# absent in that case.
+ADDON_WAIT=90
+log "waiting up to ${ADDON_WAIT}s for SCP'd addon at $ADDON_SRC..."
+for i in $(seq 1 "$ADDON_WAIT"); do
   if [ -f "$ADDON_SRC" ]; then
-    cp "$ADDON_SRC" "$ADDONS_DIR/blender_mcp.py"
-  else
-    log "addon not at $ADDON_SRC; downloading from GitHub..."
+    # Sanity-check it's our patched addon (has the scene-diff marker), not a
+    # stale/empty partial SCP. Without this a half-written file could install
+    # a broken addon.
+    if grep -q "_format_scene_diff" "$ADDON_SRC" 2>/dev/null; then
+      log "installing PATCHED blender-mcp add-on from $ADDON_SRC (ref ${ADDON_REF}, waited ${i}s)..."
+      cp "$ADDON_SRC" "$ADDONS_DIR/blender_mcp.py"
+      log "patched addon installed at $ADDONS_DIR/blender_mcp.py"
+      break
+    else
+      log "addon present but missing scene-diff marker (partial SCP?); retrying..."
+    fi
+  fi
+  # Last iteration: give up waiting and fall through to the GitHub fallback.
+  if [ "$i" = "$ADDON_WAIT" ]; then
+    log "WARN: SCP'd addon never arrived at $ADDON_SRC after ${ADDON_WAIT}s — falling back to UPSTREAM (WITHOUT scene-diff patch). Previews/diffs will be degraded."
     REF="$ADDON_REF"
     if [ "$REF" = "main" ]; then
       REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
@@ -166,14 +187,13 @@ if [ ! -f "$ADDONS_DIR/blender_mcp.py" ]; then
     fi
     curl -fsSL "https://raw.githubusercontent.com/wp07e/blender-mcp/${REF}/addon.py" \
       -o "$ADDONS_DIR/blender_mcp.py" || {
-      log "FATAL: could not fetch blender-mcp addon"
-      exit 1
-    }
+        log "FATAL: could not fetch blender-mcp addon"
+        exit 1
+      }
+    log "UPSTREAM (unpatched) addon installed at $ADDONS_DIR/blender_mcp.py"
   fi
-  log "addon installed at $ADDONS_DIR/blender_mcp.py"
-else
-  log "blender-mcp add-on already installed"
-fi
+  sleep 1
+done
 
 # ── 6. Launch Xvfb (virtual display for the add-on + EEVEE) ──────────────────
 if ! pgrep -x Xvfb >/dev/null 2>&1; then
