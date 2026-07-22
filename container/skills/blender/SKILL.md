@@ -112,7 +112,12 @@ For any model with more than one part:
 2. **Build each segment and parent it immediately** — `Head` → root, `Thorax` →
    root, `Abdomen` → root, each `Leg_*` → `Thorax`, each `Antenna_*` → `Head`.
    **Never leave a part unparented.** Parenting is part of "creating" a part, not
-   an afterthought.
+   an afterthought. **ALWAYS use the `parent_object(child, parent)` MCP tool** —
+   never set `obj.parent` directly in execute_code. Setting `obj.parent` directly
+   doubles the child's world position (the parent transform stacks on the local
+   position), which is the #1 cause of disjointed/floating parts. The
+   `parent_object` tool uses `keep_transform=True` so the child stays at its
+   intended world position.
 3. **Model one side and mirror** for symmetrical pairs. Create `Leg_L_Front`,
    add a Mirror modifier (or linked duplicate), producing `Leg_R_Front`. Do not
    freehand both sides independently — they'll diverge.
@@ -231,6 +236,22 @@ When using Subdivision Surface on a body form:
   form holds its silhouette under subdivision.
 - Bare subdivision on separate primitives still looks like separate primitives
   — subdivide a *connected* mesh for the organic-form benefit to register.
+
+**6. Lighting and camera BEFORE detailed geometry.**
+
+Set up 3-point lighting (key, fill, rim) and the camera **before** building
+detailed geometry. Take a `get_viewport_screenshot(from_camera=True)` after the
+first 2-3 body segments to verify framing and visibility early. Discovering
+framing or lighting problems after the full model is built wastes the entire
+build.
+
+**7. Use a light preview material during construction.**
+
+Dark materials (e.g. dark brown chitin at Base Color 0.12, 0.07, 0.04) are
+invisible in low-sample EEVEE preview renders — they render as undifferentiated
+dark blobs. During construction, assign a **light gray clay material** (Base
+Color 0.8, 0.8, 0.8, roughness 0.5) so the form is visible in previews. Switch
+to the final materials only after geometry and framing are verified.
 
 ### Retry & iteration caps (PREVENTS INFINITE-LOOP CRASHES)
 

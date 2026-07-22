@@ -98,8 +98,9 @@ export async function buildBlenderLeasePrefill(
     lines.push(`   Then poll state.json every ~10s (phase: starting → rendering → gpu_ready) and check exports/preview.png.`);
     lines.push(`3. Camera: use aim_camera_at(camera, target) — it auto-positions distance from the bounding box. For tiny subjects pass explicit distance=. NEVER hand-calculate rotation.`);
     lines.push(`4. Transforms: use apply_scale_safe(obj) — NEVER bpy.ops.object.transform_apply() (zeros locations, collapses models).`);
-    lines.push(`5. Never delete/recreate existing objects — modify in place. Destroying an object orphans all constraint targets and references (the scene-diff will flag this).`);
-    lines.push(`6. Verify early: get_viewport_screenshot after the first 2-3 parts to check the scene. NOTE: it shows the EDITOR viewport, NOT the camera's view — to check framing, trigger a preview render (rule 2).`);
+    lines.push(`5. Parenting: use parent_object(child, parent) — NEVER set obj.parent directly (doubles world position, causes disjointed parts).`);
+    lines.push(`6. Never delete/recreate existing objects — modify in place. Destroying an object orphans all constraint targets and references (the scene-diff will flag this).`);
+    lines.push(`7. Verify early: get_viewport_screenshot after the first 2-3 parts. Use get_viewport_screenshot(from_camera=True) to check camera framing. Set up lighting + camera BEFORE detailed geometry — use a light gray preview material so the form is visible.`);
     lines.push(``);
     lines.push(`If blender tools return "Connection refused", wait ~30-60s and retry — the host watchdog auto-restarts Blender. Your scene.blend is preserved.`);
     if (phase && RENDER_BUSY_PHASES.has(phase)) {

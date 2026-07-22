@@ -214,13 +214,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # BLENDER_MCP_REF=fix/viewport-bytes to track the branch HEAD instead (raw.gh
 # accepts branch names directly, so the SHA-resolution branch below is only an
 # optimization for cache stability, not a correctness requirement).
-# This SHA includes: (1) aim_camera_at + apply_scale_safe tools, AND (2) the
-# viewport-screenshot base64-over-socket fix + BLENDER_SCREENSHOT_DIR path
-# return, AND (3) aim_camera_at auto-distance from bounding box, AND (4)
-# get_viewport_screenshot from_camera parameter, AND (5) execute_code render
-# block at MCP server layer (not addon — run.py's direct-socket renders must
-# NOT be blocked).
-ARG BLENDER_MCP_REF=6e16dd7e0c2787e24500d8ebdd2fcf256f83e059
+# This SHA includes: (1) aim_camera_at + apply_scale_safe + parent_object tools,
+# AND (2) the viewport-screenshot base64-over-socket fix, AND (3) aim_camera_at
+# auto-distance (2.0x) from bounding box, AND (4) get_viewport_screenshot
+# from_camera parameter, AND (5) execute_code render block at MCP server layer.
+ARG BLENDER_MCP_REF=e2bc6e1b2b461d9b9c71983ecf19c690b472e785
 # The Blender version the GPU onstart script downloads (NOT apt — apt only has
 # 3.0.1 on Ubuntu 22.04). Downloaded from blender.org at instance boot time.
 # Set to "latest-4.5" to auto-resolve, or pin to a specific version like "4.5.11".

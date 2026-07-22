@@ -469,6 +469,7 @@ class BlenderMCPServer:
             "get_hunyuan3d_status": self.get_hunyuan3d_status,
             "aim_camera_at": self.aim_camera_at,
             "apply_scale_safe": self.apply_scale_safe,
+            "parent_object": self.parent_object,
         }
 
         # Add Polyhaven handlers only if enabled
@@ -675,7 +676,15 @@ class BlenderMCPServer:
                     target_center = Vector(target.location)
 
             if distance is None:
-                distance = max_dim * 3.5
+                # Compute distance so the subject fills ~70% of the frame at the
+                # given focal length. The formula: distance = (max_dim / 2) /
+                # tan(fov/2) * (1 / fill_factor). For a 50mm lens on a 36mm
+                # sensor, horizontal fov ≈ 39.6°, so tan(fov/2) ≈ 0.36. With a
+                # fill factor of 0.7 (subject fills 70% of frame), distance ≈
+                # max_dim / (2 * 0.36 * 0.7) ≈ max_dim * 2.0. The old 3.5x was
+                # too far for small subjects. Cap the minimum at 0.5 so tiny
+                # objects aren't inside the camera.
+                distance = max(max_dim * 2.0, 0.5)
 
             # Place camera at a 3/4 front-right-above angle from the target.
             # This is the most flattering default for presenting a 3D subject.
@@ -757,6 +766,61 @@ class BlenderMCPServer:
             }
         except Exception as e:
             print(f"Error in apply_scale_safe: {str(e)}")
+            traceback.print_exc()
+            return {"error": str(e)}
+
+    def parent_object(self, child_name, parent_name):
+        """Parent an object while preserving its world-space position.
+
+        This is the structural fix for the #1 cause of disjointed parts across
+        every modeling session: when you set `obj.parent = parent` directly (or
+        use parent_set without keep_transform), Blender applies the parent's
+        world transform ON TOP of the child's local position — so the child's
+        world position doubles. Legs, antennae, and other appendages end up
+        displaced from where they were placed, making the model look disjointed.
+
+        This method uses bpy.ops.object.parent_set(keep_transform=True), which
+        sets matrix_parent_inverse so the child stays at its intended world
+        position after parenting. The agent should ALWAYS use this tool instead
+        of setting obj.parent directly or calling parent_set without
+        keep_transform.
+        """
+        try:
+            child = bpy.data.objects.get(child_name)
+            if child is None:
+                return {"error": f"Child object '{child_name}' not found"}
+            parent = bpy.data.objects.get(parent_name)
+            if parent is None:
+                return {"error": f"Parent object '{parent_name}' not found"}
+
+            from mathutils import Vector
+            before_world = child.matrix_world.translation.copy()
+
+            # Ensure Object Mode + correct selection.
+            if bpy.context.mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.select_all(action='DESELECT')
+            # parent_set requires: active=parent, child selected. But actually
+            # Blender's parent_set requires the PARENT to be active and all
+            # objects to be selected, with the parent being the active object.
+            child.select_set(True)
+            parent.select_set(True)
+            bpy.context.view_layer.objects.active = parent
+
+            bpy.ops.object.parent_set(type='OBJECT', keep_transform=True)
+
+            after_world = child.matrix_world.translation.copy()
+            preserved = (before_world - after_world).length < 0.001
+
+            print(f"Parented '{child_name}' → '{parent_name}', world pos preserved: {preserved}")
+            return {
+                "child": child_name,
+                "parent": parent_name,
+                "world_position_preserved": preserved,
+                "world_position": [round(after_world.x, 4), round(after_world.y, 4), round(after_world.z, 4)],
+            }
+        except Exception as e:
+            print(f"Error in parent_object: {str(e)}")
             traceback.print_exc()
             return {"error": str(e)}
 
