@@ -469,15 +469,31 @@ class BlenderMCPServer:
                 if mutating and before is not None:
                     diff = self._format_scene_diff(before)
                     if diff:
-                        # result is a string for execute_code (the captured
-                        # stdout), a dict for the asset/structured handlers.
+                        # The blender-mcp MCP server surfaces the addon response
+                        # to the agent by reading only specific keys per handler.
+                        # execute_code (the path for ~all mutations) reads
+                        # result["result"] (the captured stdout string); the
+                        # asset handlers (download_polyhaven_asset, set_texture,
+                        # download_sketchfab_model, rodin/hunyuan importers)
+                        # format their own fields but always include the stdout
+                        # under "result"/"message". So we append the diff into
+                        # whichever "result" string key exists — that is the one
+                        # field guaranteed to reach the agent's tool result.
                         if isinstance(result, str):
                             result = (result + "\n" + diff) if result else diff
                         elif isinstance(result, dict):
-                            existing = result.get("return") or result.get("result") or ""
-                            result["_scene_diff"] = diff
-                            if existing and isinstance(existing, str):
-                                result["return"] = existing + "\n" + diff
+                            cur = result.get("result")
+                            if isinstance(cur, str):
+                                result["result"] = (cur + "\n" + diff) if cur else diff
+                            else:
+                                # Structured handler (polyhaven/sketchfab/etc.):
+                                # fall back to "message" if present, else stash
+                                # under "result" so at least the key exists.
+                                msg = result.get("message")
+                                if isinstance(msg, str):
+                                    result["message"] = (msg + "\n" + diff) if msg else diff
+                                else:
+                                    result["result"] = diff
                 return {"status": "success", "result": result}
             except Exception as e:
                 print(f"Error in handler: {str(e)}")

@@ -131,5 +131,21 @@ check("execute_code" not in S._READ_ONLY_COMMANDS, "execute_code treated as muta
 check("get_scene_info" in S._READ_ONLY_COMMANDS, "get_scene_info treated as read-only")
 check("get_viewport_screenshot" in S._READ_ONLY_COMMANDS, "screenshot treated as read-only")
 
+# 6. CRITICAL: the diff must land under the "result" key of the execute_code
+#    response, because the blender-mcp MCP server reads ONLY result.get("result")
+#    when surfacing the tool output to the agent. Earlier versions put it under
+#    "_scene_diff"/"return", which the server silently discarded.
+bpy.data.objects = []
+before = s._scene_manifest()
+bpy.data.objects.append(FakeObj("Thorax", (0, 0, 0), parent=None, verts=64))
+diff = s._format_scene_diff(before)
+# Simulate what the handler does with a dict result like execute_code returns.
+sim_result = {"executed": True, "result": "ok"}
+cur = sim_result.get("result")
+if isinstance(cur, str):
+    sim_result["result"] = (cur + "\n" + diff) if cur else diff
+check("scene-diff" in sim_result["result"], "diff lands under the 'result' key the MCP server reads")
+check("_scene_diff" not in sim_result, "diff NOT stranded under the unread '_scene_diff' key")
+
 print("\n" + ("ALL TESTS PASSED" if failures == 0 else f"{failures} TEST(S) FAILED"))
 sys.exit(1 if failures else 0)
