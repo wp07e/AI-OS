@@ -164,10 +164,15 @@ way. **Every** render needs a camera, so this is subject-independent.
 
 - **Use `aim_camera_at(camera_name, target_name, lens=50)`** via the blender
   MCP tools. It creates a Damped Track constraint so the camera always looks at
-  the target regardless of where either is moved.
-- **Set up and verify the camera BEFORE building detailed geometry.** A
-  `get_viewport_screenshot` costs nothing and catches framing errors 20 minutes
-  earlier than a full preview render.
+  the target regardless of where either is moved. It auto-computes distance from
+  the target's combined descendant bounding box.
+- **For small subjects**, the auto-distance may still be too far. Pass an
+  explicit `distance=` — as a rule of thumb, use `distance = subject_length *
+  1.5`. For a 0.9-unit ant, that's ~1.3; for a 0.15-unit small insect, ~0.2.
+  When in doubt, start closer and pull back.
+- **Set up and verify the camera BEFORE building detailed geometry.** Use
+  `get_viewport_screenshot(from_camera=True)` to see exactly what the camera
+  sees — the editor viewport view is useless for framing checks.
 - When a new camera appears, the scene-diff output will nudge you toward
   `aim_camera_at` — heed it.
 
@@ -209,8 +214,12 @@ technique skill (Step 0) for the authoritative anatomy table — if it says
 - **Organic appendages** (legs, antennae, tentacles, vines, cables): prefer
   **Bezier curves with a circular bevel** over raw cylinders. Curves give
   smooth, natural bends with fewer vertices and articulated joints. Create a
-  Bezier curve, set its `bevel_depth` for thickness. **Note:** curves render as
-  thin wireframe lines in viewport screenshots until converted to mesh — call
+  Bezier curve, set its `bevel_depth` for thickness. **Always pass
+  `location=(x,y,z)` when creating curves** — without it the curve object's
+  origin stays at (0,0,0) even if the bezier points are positioned correctly in
+  local space, so the part appears at the wrong world position after
+  `convert(target='MESH')`. **Note:** curves render as thin wireframe lines in
+  viewport screenshots until converted to mesh — call
   `bpy.ops.object.convert(target='MESH')` before taking a viewport grab so you
   can verify the actual form.
 
@@ -307,52 +316,32 @@ tight loop.
    data loss if the GPU instance dies.
 
 4. **Produce a quick preview after every meaningful change** so the user sees
-   visual feedback in the canvas immediately. **Trigger it via the preview
-   route**, NOT `execute_code` and **NEVER by invoking run.py yourself**:
-   ```
-   POST /api/workspace/<id>/blender/preview
-   body: {"settings": {"samples": 16, "resolution_x": 960, "resolution_y": 540}}
-   ```
-   This runs `op:preview` through the helper script, which talks to the same
-   Blender socket your MCP tools use but with a **600s budget** and is
-   fire-and-forget. Do NOT run the preview via `execute_code`
-   (`bpy.ops.render.render`) on anything but a trivial scene — `execute_code`
-   goes through the MCP bridge and is capped at **~120s**, so complex scenes
-   time out and force you down to an unusably small 640x360.
+   visual feedback in the canvas immediately.
 
-   **Do NOT invoke `run.py` yourself** (e.g. `uv run --project /app/blender
-   python run.py ...`) via `execute_code` or a shell. Doing so blocks the single
-   Blender socket the MCP bridge shares, hits the ~120s shell/bridge timeout,
-   gets SIGTERM'd (signal 15), and triggers a Blender watchdog restart — exactly
-   the crash loop you want to avoid. The HTTP preview route is the ONLY correct
-   path: it background-launches run.py (fire-and-forget) with the 600s budget
-   and never blocks your socket.
+   **NEVER render via `execute_code`** (`bpy.ops.render.render` is BLOCKED by
+   the addon — it crashes the MCP bridge). Instead, launch the helper script
+   `run.py` in the **background** via your bash tool so it does NOT block your
+   shell or the Blender socket:
 
-   The preview route has no such ceiling. After POSTing, poll `state.json`
-   (phase goes `starting` → `rendering` → `gpu_ready`) and the renders[] preview
-   entry; the host syncs `exports/preview.png` from the GPU within ~5s.
+   ```
+   echo '{"op":"preview","settings":{"samples":16,"resolution_x":960,"resolution_y":540}}' > /workspace/blends/<id>/request.json && nohup setsid bash -c 'cd /app/blender && uv run --project /app/blender python /app/blender/run.py /workspace/blends/<id> --request request.json' >> /workspace/blends/<id>/pipeline.log 2>&1 &
+   ```
 
-   The `execute_code` preview (below) is a fallback ONLY for tiny scenes where
-   its 120s limit can't bind:
-   ```python
-   import bpy, os
-   scene = bpy.context.scene
-   scene.render.engine = 'BLENDER_EEVEE_NEXT'
-   scene.eevee.taa_render_samples = 16
-   scene.render.resolution_x = 960
-   scene.render.resolution_y = 540
-   scene.render.image_settings.file_format = 'PNG'
-   os.makedirs('/root/blender/renders', exist_ok=True)
-   scene.render.filepath = '/root/blender/renders/preview.png'
-   bpy.ops.render.render(write_still=True)
-   ```
-   Then update `state.json` with a renders[] entry pointing at
-   `exports/preview.png`:
-   ```json
-   {"id": "preview", "label": "Preview", "path": "exports/preview.png",
-    "thumbPath": "exports/preview.png", "engine": "BLENDER_EEVEE_NEXT", "samples": 16,
-    "createdAt": "<ISO>"}
-   ```
+   Replace `<id>` with the actual instance folder path. Run this as **ONE bash
+   command, then return immediately** — do NOT wait for it. The `nohup setsid`
+   detaches the process so it survives the bash tool returning; the `&`
+   backgrounds it.
+
+   **If pipeline.log stays empty after ~15s**, the launch failed. Debug by:
+   - Running the command **without** nohup (foreground) to see the error:
+     `cd /app/blender && uv run --project /app/blender python /app/blender/run.py /workspace/blends/<id> --request request.json`
+   - Checking that `/workspace/blends/<id>/request.json` was actually written.
+   - Checking that `/app/blender/run.py` exists and the uv venv is present.
+
+   After launching, poll `state.json` every ~10s (phase goes `starting` →
+   `rendering` → `gpu_ready`) and check `exports/preview.png`. The host syncs
+   the preview from the GPU within ~5s after `gpu_ready`.
+
    This preview overwrites the previous one each time — it is NOT a final
    render. The user can still click "Render" in the UI for a high-quality
    Cycles render at full resolution.
