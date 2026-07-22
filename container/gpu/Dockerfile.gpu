@@ -78,12 +78,14 @@ RUN BLENDER_PY=$(find "$BLENDER_INSTALL_DIR" -name "python3.*" -path "*/python/b
     "$BLENDER_PY" -m pip install --quiet requests
 
 # ── 4. blender-mcp addon ─────────────────────────────────────────────────────
-# Install the addon as a single file in the Blender addons directory, matching
-# onstart.sh section 5. The addon is a self-contained single file with its own
-# bl_info, register(), and unregister(). Fetched from the wp07e fork pinned to a
-# SHA (the fork carries the viewport-screenshot bytes-over-socket fix on
-# fix/viewport-bytes). Set BLENDER_MCP_REF=fix/viewport-bytes to track the
-# branch HEAD instead; raw.githubusercontent accepts branch names directly.
+# The addon is VENDORED in this repo at container/gpu/addon.py (based on the
+# wp07e fork at SHA 5519e55, which carries the viewport-screenshot bytes-over-
+# socket fix). We vendor it because it carries our scene-diff interception:
+# automatic before/after manifest diffing on every mutating MCP command, plus
+# transform_apply + unparented-part guards. Baking it into the GPU image is the
+# ONLY delivery path that works — the GPU boots via onstart-baked.sh which
+# assumes the addon is already in the image, and the lease-manager SCP is skipped
+# for baked images (isBakedImage=true).
 ARG BLENDER_MCP_REF=5519e5550023dc2f3ecacd2df1baee92e143777f
 ENV ADDON_REF=${BLENDER_MCP_REF}
 
@@ -91,15 +93,12 @@ RUN BLENDER_MAJOR="${BLENDER_VERSION%%.*}" && \
     BLENDER_MINOR="${BLENDER_VERSION#*.}" && \
     BLENDER_MINOR="${BLENDER_MINOR%%.*}" && \
     ADDONS_DIR="/root/.config/blender/${BLENDER_MAJOR}.${BLENDER_MINOR}/scripts/addons" && \
-    mkdir -p "$ADDONS_DIR" && \
-    REF="${BLENDER_MCP_REF}" && \
-    if [ "$REF" = "main" ]; then \
-      REF=$(curl -fsSL "https://api.github.com/repos/wp07e/blender-mcp/commits/main" \
-        | grep -m1 '"sha"' | sed 's/.*"sha": "\([^"]*\)".*/\1/'); \
-    fi && \
-    echo "blender-mcp addon ref: $REF" && \
-    curl -fsSL "https://raw.githubusercontent.com/wp07e/blender-mcp/${REF}/addon.py" \
-      -o "$ADDONS_DIR/blender_mcp.py"
+    mkdir -p "$ADDONS_DIR"
+
+# COPY uses the literal path (Dockerfile COPY doesn't expand RUN-env vars).
+# The Blender version is pinned to 4.5.x so the addons dir is always
+# /root/.config/blender/4.5/scripts/addons/.
+COPY addon.py /root/.config/blender/4.5/scripts/addons/blender_mcp.py
 
 # ── 5. Blender startup script ────────────────────────────────────────────────
 # This script is run by Blender via --python on launch. It enables the addon
