@@ -179,21 +179,32 @@ cheapest verification step available — do **not** wait for the first preview
 render to discover a camera or assembly problem. The longer a defect goes
 unseen, the more geometry is built on top of it.
 
-**4. Connected vs separate geometry — a judgment call, not a rule.**
+**4. Connected vs separate geometry — match the subject's anatomy.**
 
-- **Organic subjects where parts should blend** (creature bodies, character
-  torsos, slime): build as a **single connected mesh** via Edit Mode extrusion +
-  scaling, with bridge edge loops between segments. Separate UV spheres always
-  look disjointed — the gaps read as "detached floating parts" to the vision
-  system even when correctly parented.
+The right approach depends on the subject's actual anatomy. Read the matching
+technique skill (Step 0) for the authoritative anatomy table — if it says
+"segmented body," the segments ARE separate and that's correct.
+
+- **Continuous-surface creatures** (slime, worms, blobs, character torsos where
+  muscle flows): build as a **single connected mesh** via Edit Mode extrusion +
+  scaling, with bridge edge loops between forms. Separate UV spheres look
+  disjointed here because the surface should flow continuously.
+- **Segmented exoskeleton creatures** (ants, beetles, spiders, crabs — anything
+  the anatomy table calls "Insectoid: Arthropod"): **separate segments that
+  overlap at the joints** is correct — the exoskeleton segments are genuinely
+  distinct rigid plates. The key: the segments must **overlap/connect at the
+  petioles** (the thin waist joints), not leave visible gaps. A single blended
+  mesh would look wrong for an arthropod.
 - **Subjects with distinct rigid parts** (machinery, vehicles, armored
   creatures): separate meshes + the assembly protocol above are correct — the
   gaps are intentional.
 - **Organic appendages** (legs, antennae, tentacles, vines, cables): prefer
   **Bezier curves with a circular bevel** over raw cylinders. Curves give
   smooth, natural bends with fewer vertices and articulated joints. Create a
-  Bezier curve, set its `bevel_depth` for thickness, and convert to mesh only
-  if you need to sculpt detail.
+  Bezier curve, set its `bevel_depth` for thickness. **Note:** curves render as
+  thin wireframe lines in viewport screenshots until converted to mesh — call
+  `bpy.ops.object.convert(target='MESH')` before taking a viewport grab so you
+  can verify the actual form.
 
 **5. Subdivision Surface — levels and support loops.**
 

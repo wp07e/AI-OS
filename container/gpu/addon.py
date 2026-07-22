@@ -326,11 +326,18 @@ class BlenderMCPServer:
     def _scene_manifest(self):
         """Per-mesh-object snapshot used to detect what a command changed.
 
-        Captures location, scale, parent, and vertex count for every MESH
-        object. Non-mesh objects (empties, cameras, lights) are tracked by
-        name + parent only, so new empties (e.g. an AssemblyRoot) still show
-        up in the diff. World-space is intentionally NOT used — the goal is
-        to catch transform/parenting regressions, which live in local space.
+        Captures location, scale, parent, vertex count, and object identity
+        (Python id()) for every MESH object. Non-mesh objects (empties,
+        cameras, lights) are tracked by name + parent + id, so new empties
+        (e.g. an AssemblyRoot) still show up in the diff. World-space is
+        intentionally NOT used — the goal is to catch transform/parenting
+        regressions, which live in local space.
+
+        The id() field lets _format_scene_diff detect destroy-and-recreate:
+        when an object is deleted and a same-named one created, the id changes
+        even though the name matches. This orphans all constraint targets and
+        references pointing at the old object — the exact failure that broke
+        the camera's DAMPED_TRACK constraint in the ant session.
         """
         manifest = {}
         try:
@@ -343,12 +350,14 @@ class BlenderMCPServer:
                         "scl": self._round3(obj.scale.x),
                         "parent": obj.parent.name if obj.parent else None,
                         "verts": len(obj.data.vertices),
+                        "oid": obj.as_pointer(),
                     }
                 else:
                     # Empties (e.g. AssemblyRoot), cameras, lights, curves.
                     manifest[obj.name] = {
                         "type": obj.type,
                         "parent": obj.parent.name if obj.parent else None,
+                        "oid": obj.as_pointer(),
                     }
         except Exception as e:
             print(f"[scene-diff] manifest capture failed: {e}")
@@ -397,6 +406,22 @@ class BlenderMCPServer:
             if name not in after:
                 continue
             b, a = before[name], after[name]
+
+            # Detect destroy-and-recreate: same name but different object pointer.
+            # This orphans ALL constraint targets, parent references, and object
+            # references pointing at the old object — the exact failure that
+            # broke the camera's DAMPED_TRACK constraint in the ant session
+            # (agent deleted+recreated Thorax, constraint target became None).
+            # Surface it as the FIRST change so it's not buried under transforms.
+            if b.get("oid") != a.get("oid") and b.get("oid") is not None:
+                lines.append(
+                    f"  ~ {name}: ⚠ DESTROYED AND RECREATED (different object "
+                    f"pointer). ALL constraint targets and references to this "
+                    f"object are now STALE/None — re-aim cameras (aim_camera_at), "
+                    f"re-parent children, and verify references. NEVER delete and "
+                    f"recreate existing objects; modify in place."
+                )
+
             if "verts" not in b or "verts" not in a:
                 continue  # non-mesh; skip (parenting of empties handled above)
             changes = []
@@ -568,7 +593,7 @@ class BlenderMCPServer:
             traceback.print_exc()
             return {"error": str(e)}
 
-    def aim_camera_at(self, camera_name, target_name, lens=50):
+    def aim_camera_at(self, camera_name, target_name, lens=50, distance=None):
         """Point a camera at a target via a DAMPED_TRACK constraint.
 
         This is the structural fix for the recurring "camera pointing the wrong
@@ -578,6 +603,11 @@ class BlenderMCPServer:
         regardless of where either object is, so framing is correct by
         construction. Existing TRACK_TO/DAMPED_TRACK constraints on the camera
         are removed first to avoid conflicts.
+
+        If distance is None, auto-computes a sensible distance from the target's
+        world bounding box so the subject fills the frame without cropping —
+        agents consistently place cameras too close. Pass an explicit distance to
+        override.
         """
         try:
             camera = bpy.data.objects.get(camera_name)
@@ -591,6 +621,34 @@ class BlenderMCPServer:
 
             # Set focal length.
             camera.data.lens = float(lens)
+
+            # Auto-compute camera distance from the target's world bounding box.
+            # Agents consistently place cameras too close; computing from the
+            # bounding box ensures the subject fills the frame without cropping.
+            # distance = max_dimension * 3.5 gives comfortable framing for a 50mm
+            # lens. The camera is placed at an offset angle (front-right-above)
+            # so it sees the subject from a natural 3/4 perspective.
+            from mathutils import Vector
+            target_center = Vector((0.0, 0.0, 0.0))
+            max_dim = 1.0
+            if target.type == 'MESH' and target.data.vertices:
+                corners = [target.matrix_world @ Vector(c) for c in target.bound_box]
+                target_center = sum(corners, Vector()) / len(corners)
+                dims = target.dimensions
+                max_dim = max(dims.x, dims.y, dims.z)
+                if max_dim < 0.001:
+                    max_dim = 1.0
+            else:
+                target_center = Vector(target.location)
+
+            if distance is None:
+                distance = max_dim * 3.5
+
+            # Place camera at a 3/4 front-right-above angle from the target.
+            # This is the most flattering default for presenting a 3D subject.
+            import math
+            offset = Vector((distance * 0.75, -distance * 0.65, distance * 0.45))
+            camera.location = target_center + offset
 
             # Remove any existing aim constraints to avoid stacking/conflicts.
             for c in list(camera.constraints):
@@ -610,11 +668,14 @@ class BlenderMCPServer:
             if bpy.context.mode != 'OBJECT':
                 bpy.ops.object.mode_set(mode='OBJECT')
 
-            print(f"Camera '{camera_name}' aimed at '{target_name}' (lens={lens}mm)")
+            print(f"Camera '{camera_name}' aimed at '{target_name}' (lens={lens}mm, "
+                  f"distance={distance:.2f}, target_dim={max_dim:.2f})")
             return {
                 "camera": camera_name,
                 "target": target_name,
                 "lens": float(lens),
+                "distance": round(float(distance), 3),
+                "target_max_dim": round(float(max_dim), 3),
                 "constraint": "DAMPED_TRACK",
             }
         except Exception as e:
@@ -832,8 +893,30 @@ class BlenderMCPServer:
 
     def execute_code(self, code):
         """Execute arbitrary Blender Python code"""
-        # This is powerful but potentially dangerous - use with caution
+        # This is powerful but potentially dangerous - use caution
         try:
+            # Block direct renders: bpy.ops.render.render goes through the MCP
+            # bridge (~120s timeout), which complex scenes exceed — it times
+            # out, resets the connection, and crashes Blender. The agent should
+            # use the preview HTTP route (POST /api/workspace/<id>/blender/preview)
+            # instead, which background-launches run.py with a 600s budget and
+            # never blocks the socket. Agents repeatedly try execute_code renders
+            # despite docs saying not to — this blocks them structurally.
+            import re as _re
+            if _re.search(r'bpy\.ops\.render\.render', code):
+                return (
+                    "BLOCKED: bpy.ops.render.render detected in execute_code. "
+                    "Rendering via execute_code goes through the MCP bridge (~120s "
+                    "timeout) and will time out, reset the connection, and crash "
+                    "Blender. Use the preview HTTP route instead:\n"
+                    "  POST /api/workspace/<id>/blender/preview\n"
+                    "  body: {\"settings\": {\"samples\": 16, \"resolution_x\": 960, "
+                    "\"resolution_y\": 540}}\n"
+                    "Then poll state.json (phase: starting → rendering → gpu_ready) "
+                    "and exports/preview.png. The SKILL.md 'How to work' section has "
+                    "the full curl command."
+                )
+
             # Create a local namespace for execution
             namespace = {"bpy": bpy}
 

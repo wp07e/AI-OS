@@ -19,6 +19,8 @@ def stub(name, **attrs):
 
 
 # A fake Blender object — just enough attributes for the manifest logic.
+_pointer_counter = [1000]
+
 class FakeObj:
     def __init__(self, name, loc, parent=None, verts=64, type_="MESH"):
         self.type = type_
@@ -26,8 +28,15 @@ class FakeObj:
         self.location = types.SimpleNamespace(x=loc[0], y=loc[1], z=loc[2])
         self.scale = types.SimpleNamespace(x=1.0)
         self.parent = parent
+        # Each FakeObj gets a unique pointer so the scene-diff can detect
+        # destroy-and-recreate (same name, different as_pointer() value).
+        _pointer_counter[0] += 1
+        self._ptr = _pointer_counter[0]
         if type_ == "MESH":
             self.data = types.SimpleNamespace(vertices=list(range(verts)))
+
+    def as_pointer(self):
+        return self._ptr
 
 
 class _AnyBase:
@@ -149,6 +158,23 @@ check("NEVER hand-calculate" in diff, "camera nudge warns against hand-calculate
 #     before/after diff, hiding any transform regressions they cause.
 check("aim_camera_at" not in S._READ_ONLY_COMMANDS, "aim_camera_at treated as mutating")
 check("apply_scale_safe" not in S._READ_ONLY_COMMANDS, "apply_scale_safe treated as mutating")
+
+# 5c. Destroy-and-recreate detection: same name, different object pointer.
+#     This is what broke the camera's DAMPED_TRACK constraint in the ant session
+#     — the agent deleted+recreated Thorax, the constraint's target became None.
+#     The manifest tracks as_pointer() so the diff can catch this even though
+#     the name matches.
+bpy.data.objects = [FakeObj("Thorax", (0, 0, 0.05), parent=None, verts=128)]
+before = s._scene_manifest()
+# Simulate destroy-and-recreate: remove the old Thorax, add a new one with the
+# SAME name but a different FakeObj instance (hence different as_pointer()).
+bpy.data.objects.clear()
+bpy.data.objects.append(FakeObj("Thorax", (0, 0, 0.05), parent=None, verts=128))
+diff = s._format_scene_diff(before)
+print("\n--- diff (destroy-and-recreate) ---\n" + diff + "\n------")
+check("DESTROYED AND RECREATED" in diff, "destroy-and-recreate flagged by pointer change")
+check("STALE" in diff, "destroy-and-recreate warns about stale references")
+check("NEVER delete" in diff, "destroy-and-recreate reminds to modify in place")
 
 # 6. CRITICAL: the diff must land under the "result" key of the execute_code
 #    response, because the blender-mcp MCP server reads ONLY result.get("result")

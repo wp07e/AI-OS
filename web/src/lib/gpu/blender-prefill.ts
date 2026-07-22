@@ -88,35 +88,25 @@ export async function buildBlenderLeasePrefill(
       lines.push(`Cost: $${lease.dph.toFixed(3)}/hr${inet}`);
     }
     lines.push(``);
-    lines.push(
-      `You are connected to a remote Blender instance via the blender MCP tools. Use them directly for scene work (create_object, execute_code, get_render, Poly Haven assets, etc.).`,
-    );
-    lines.push(
-      `MANDATORY FIRST STEP before any modeling: run ls /workspace/skills/ and read every matching SKILL.md before creating or modifying geometry. The 94 technique skills (e.g. creature-artist for creatures/insects/animals — it has an insect anatomy table, blender-modeler for core modeling, procedural-modeling for parametric legs/antennae, hard-surface for machinery, sculpting for organic detail) contain exact anatomy/workflow recipes. Skipping them is the #1 cause of detached parts and failed builds — do NOT begin modeling until you've read the relevant skill(s), and follow the "Modeling methodology" section of /workspace/skills/blender/SKILL.md (skills-first check, one-step-at-a-time, multi-part assembly protocol, ~25-call cap).`,
-    );
-    lines.push(
-      `Footgun reminders (see the "Modeling technique footguns" section of /workspace/skills/blender/SKILL.md): use apply_scale_safe(object) — NOT bpy.ops.object.transform_apply() (it defaults to location=True and zeros every segment to the origin, collapsing multi-part models); use aim_camera_at(camera, target, lens) to frame shots — NEVER hand-calculate camera rotation (the trig fails); call get_viewport_screenshot after the first 2-3 parts are assembled to catch framing/assembly errors before they compound into a wasted render.`,
-    );
-    lines.push(
-      `Workflow after every meaningful change: (1) save via execute_code bpy.ops.wm.save_as_mainfile(filepath="/root/blender/scene.blend"), (2) trigger a quick EEVEE preview render (16 samples, 960x540) by backgrounding run.py so it does NOT block your shell or the Blender socket. CRITICAL: run.py must be launched with nohup+setsid and '&' so it detaches — a foreground run will block the bash tool until its timeout (signal 15) and may contend with the Blender socket. Do it in ONE bash call: echo '{"op":"preview","settings":{"samples":16,"resolution_x":960,"resolution_y":540}}' > '${instanceFolder}/request.json' && nohup setsid bash -c 'cd /app/blender && uv run --project /app/blender python /app/blender/run.py "${instanceFolder}" --request request.json' >> '${instanceFolder}/pipeline.log' 2>&1 &  — then immediately return. Do NOT wait for it in the bash call. (3) poll state.json every ~10s (phase goes starting → rendering → gpu_ready) and the renders[] preview entry at exports/preview.png. The host syncs the preview from the GPU to the workspace within ~5s after gpu_ready. NEVER call bpy.ops.render.render via execute_blender_code for anything but a trivial scene — it goes through the MCP bridge (~120s cap) and will time out, reset the connection, and crash Blender.`,
-    );
-    lines.push(
-      `There is ONE Blender process — your MCP tools and the user's "Render" button share its single-threaded addon socket. Final high-quality renders are owned by the helper script (op:"render"), triggered by the user clicking "Render" in the UI. NEVER trigger a Cycles render or large EEVEE render yourself via MCP: it blocks the socket, times out the bridge, and can corrupt scene.blend. Your only job on a render is to poll state.json + exports/render_*.png every ~15s and report when it finishes.`,
-    );
-    lines.push(
-      `If a blender tool call returns "Connection refused", "Connection reset by peer", or the MCP server reports Blender unreachable, the Blender process may have crashed. A host-side watchdog detects this and auto-restarts Blender within ~30s (it SSHes into the GPU instance, kills stale Blender, relaunches with your saved scene.blend, and restarts the tunnel). Just WAIT ~30-60s and retry — do NOT try to restart it yourself (you can't SSH to the GPU instance, and the web API restart route requires browser auth you don't have). Your scene.blend is preserved across restarts.`,
-    );
+    lines.push(`You are connected to a remote Blender instance via the blender MCP tools.`);
+    lines.push(``);
+    lines.push(`Read /workspace/skills/blender/SKILL.md NOW — it is the mandatory authority for all Blender work. Key rules that get violated most often:`);
+    lines.push(``);
+    lines.push(`1. Skills-first: ls /workspace/skills/ and read matching SKILL.md files BEFORE any geometry (creature-artist for creatures, blender-modeler for basics, etc.).`);
+    lines.push(`2. Renders: NEVER call bpy.ops.render.render via execute_code (it is now BLOCKED — use the preview HTTP route: POST /api/workspace/<id>/blender/preview with {"settings":{"samples":16,"resolution_x":960,"resolution_y":540}}, then poll state.json). See SKILL.md "How to work" for the full command.`);
+    lines.push(`3. Camera: use aim_camera_at(camera, target) — it auto-positions distance from the bounding box. NEVER hand-calculate rotation.`);
+    lines.push(`4. Transforms: use apply_scale_safe(obj) — NEVER bpy.ops.object.transform_apply() (zeros locations, collapses models).`);
+    lines.push(`5. Never delete/recreate existing objects — modify in place. Destroying an object orphans all constraint targets and references (the scene-diff will flag this).`);
+    lines.push(`6. Verify early: get_viewport_screenshot after the first 2-3 parts, before investing in detail.`);
+    lines.push(``);
+    lines.push(`If blender tools return "Connection refused", wait ~30-60s and retry — the host watchdog auto-restarts Blender. Your scene.blend is preserved.`);
     if (phase && RENDER_BUSY_PHASES.has(phase)) {
-      lines.push(
-        `⚠ A RENDER IS CURRENTLY RUNNING INSIDE BLENDER (state.json phase: ${phase}). Do NOT call ANY blender MCP tool right now — the call will queue behind the render, time out the bridge, and may corrupt scene.blend. Poll state.json (phase goes starting → rendering → complete) and exports/render_####.png every ~15s. Resume scene edits only once phase leaves {starting, rendering, recovering}.`,
-      );
+      lines.push(``);
+      lines.push(`⚠ A RENDER IS RUNNING (state.json phase: ${phase}). Do NOT call ANY blender MCP tool. Poll state.json + exports/ until phase leaves {starting, rendering, recovering}.`);
     }
-    lines.push(
-      `Brand assets (if any) were pushed to /root/assets/ on the GPU instance during provisioning. Load them with bpy.data.images.load('/root/assets/<filename>'). List available files with: import os; print(os.listdir('/root/assets')). DO NOT try to read from /workspace/brand/assets/ — that path is on the host, not the GPU.`,
-    );
-    lines.push(
-      `Keep state.json enriched: scene {objectCount, engine, savedAt}, renders[]. Read memory.md before acting to pick up where a prior session left off.`,
-    );
+    lines.push(``);
+    lines.push(`Brand assets: /root/assets/<filename> on the GPU (NOT /workspace/brand/assets/). Load with bpy.data.images.load().`);
+    lines.push(`Read memory.md + state.json before acting to resume prior work.`);
   } else if (lease.state === "queued") {
     lines.push(`Queue position: ${lease.queue_position ?? 0}`);
     lines.push(
