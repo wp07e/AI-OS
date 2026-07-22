@@ -179,6 +179,14 @@ cheapest verification step available — do **not** wait for the first preview
 render to discover a camera or assembly problem. The longer a defect goes
 unseen, the more geometry is built on top of it.
 
+**Two kinds of viewport screenshot:**
+- `get_viewport_screenshot()` (default) — shows the **editor's free-look view**.
+  Use this to check overall assembly, part positions, and hierarchy.
+- `get_viewport_screenshot(from_camera=True)` — shows **what the scene camera
+  sees**. Use this to verify framing after `aim_camera_at`. The editor view and
+  camera view are completely different — checking framing with the editor view
+  is useless. Always use `from_camera=True` when verifying camera placement.
+
 **4. Connected vs separate geometry — match the subject's anatomy.**
 
 The right approach depends on the subject's actual anatomy. Read the matching

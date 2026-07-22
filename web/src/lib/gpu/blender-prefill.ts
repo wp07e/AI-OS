@@ -93,11 +93,13 @@ export async function buildBlenderLeasePrefill(
     lines.push(`Read /workspace/skills/blender/SKILL.md NOW — it is the mandatory authority for all Blender work. Key rules that get violated most often:`);
     lines.push(``);
     lines.push(`1. Skills-first: ls /workspace/skills/ and read matching SKILL.md files BEFORE any geometry (creature-artist for creatures, blender-modeler for basics, etc.).`);
-    lines.push(`2. Renders: NEVER call bpy.ops.render.render via execute_code (it is now BLOCKED — use the preview HTTP route: POST /api/workspace/<id>/blender/preview with {"settings":{"samples":16,"resolution_x":960,"resolution_y":540}}, then poll state.json). See SKILL.md "How to work" for the full command.`);
-    lines.push(`3. Camera: use aim_camera_at(camera, target) — it auto-positions distance from the bounding box. NEVER hand-calculate rotation.`);
+    lines.push(`2. Renders: NEVER call bpy.ops.render.render via execute_code (it is BLOCKED — crashes the bridge). To preview, background run.py with nohup (ONE bash call, then return immediately):`);
+    lines.push(`   echo '{"op":"preview","settings":{"samples":16,"resolution_x":960,"resolution_y":540}}' > '${instanceFolder}/request.json' && nohup setsid bash -c 'cd /app/blender && uv run --project /app/blender python /app/blender/run.py "${instanceFolder}" --request request.json' >> '${instanceFolder}/pipeline.log' 2>&1 &`);
+    lines.push(`   Then poll state.json every ~10s (phase: starting → rendering → gpu_ready) and check exports/preview.png.`);
+    lines.push(`3. Camera: use aim_camera_at(camera, target) — it auto-positions distance from the bounding box. For tiny subjects pass explicit distance=. NEVER hand-calculate rotation.`);
     lines.push(`4. Transforms: use apply_scale_safe(obj) — NEVER bpy.ops.object.transform_apply() (zeros locations, collapses models).`);
     lines.push(`5. Never delete/recreate existing objects — modify in place. Destroying an object orphans all constraint targets and references (the scene-diff will flag this).`);
-    lines.push(`6. Verify early: get_viewport_screenshot after the first 2-3 parts, before investing in detail.`);
+    lines.push(`6. Verify early: get_viewport_screenshot after the first 2-3 parts to check the scene. NOTE: it shows the EDITOR viewport, NOT the camera's view — to check framing, trigger a preview render (rule 2).`);
     lines.push(``);
     lines.push(`If blender tools return "Connection refused", wait ~30-60s and retry — the host watchdog auto-restarts Blender. Your scene.blend is preserved.`);
     if (phase && RENDER_BUSY_PHASES.has(phase)) {

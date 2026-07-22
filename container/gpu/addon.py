@@ -628,9 +628,35 @@ class BlenderMCPServer:
             # distance = max_dimension * 3.5 gives comfortable framing for a 50mm
             # lens. The camera is placed at an offset angle (front-right-above)
             # so it sees the subject from a natural 3/4 perspective.
+            #
+            # When the target is an EMPTY (e.g. AssemblyRoot), compute a combined
+            # bounding box from ALL descendant meshes — otherwise the EMPTY has no
+            # dimensions and we'd fall back to a 1.0m default that puts the camera
+            # way too far for small subjects (the ant was 0.15m but the camera
+            # went to 3.5m distance).
             from mathutils import Vector
             target_center = Vector((0.0, 0.0, 0.0))
             max_dim = 1.0
+
+            def _combined_bbox(obj):
+                """World-space bounding box of obj + all descendant meshes."""
+                pts = []
+                def collect(o):
+                    if o.type == 'MESH' and o.data.vertices:
+                        for c in o.bound_box:
+                            pts.append(o.matrix_world @ Vector(c))
+                    for child in o.children:
+                        collect(child)
+                collect(obj)
+                if not pts:
+                    return None
+                min_v = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
+                max_v = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
+                center = (min_v + max_v) / 2
+                dims = max_v - min_v
+                return center, max(dims.x, dims.y, dims.z)
+
+            bbox = None
             if target.type == 'MESH' and target.data.vertices:
                 corners = [target.matrix_world @ Vector(c) for c in target.bound_box]
                 target_center = sum(corners, Vector()) / len(corners)
@@ -639,7 +665,14 @@ class BlenderMCPServer:
                 if max_dim < 0.001:
                     max_dim = 1.0
             else:
-                target_center = Vector(target.location)
+                # EMPTY or non-mesh: compute combined bbox from descendants.
+                bbox = _combined_bbox(target)
+                if bbox:
+                    target_center, max_dim = bbox
+                    if max_dim < 0.001:
+                        max_dim = 1.0
+                else:
+                    target_center = Vector(target.location)
 
             if distance is None:
                 distance = max_dim * 3.5
@@ -786,7 +819,7 @@ class BlenderMCPServer:
 
         return obj_info
 
-    def get_viewport_screenshot(self, max_size=800, filepath=None, format="png"):
+    def get_viewport_screenshot(self, max_size=800, filepath=None, format="png", from_camera=False):
         """
         Capture a screenshot of the current 3D viewport and save it to the specified path.
 
@@ -794,6 +827,11 @@ class BlenderMCPServer:
         - max_size: Maximum size in pixels for the largest dimension of the image
         - filepath: Path where to save the screenshot file
         - format: Image format (png, jpg, etc.)
+        - from_camera: If True, render from the SCENE CAMERA's perspective (what
+          the camera sees), not the editor's free-look viewport. This is critical
+          for verifying camera framing — the editor viewport shows a completely
+          different view than the camera, so a normal screenshot can't catch
+          framing issues. Uses the scene's active camera.
 
         Returns success/error status
         """
@@ -825,6 +863,25 @@ class BlenderMCPServer:
                 import numpy as np
 
                 r3d = space.region_3d
+
+                # If from_camera, swap the view matrix to the scene camera's
+                # perspective so draw_view3d renders what the camera sees.
+                # Without this, the screenshot shows the editor's free-look
+                # view — which is useless for verifying camera framing.
+                saved_view_matrix = None
+                saved_persp = None
+                if from_camera:
+                    cam = bpy.context.scene.camera
+                    if cam is None:
+                        return {"error": "from_camera=True but no scene camera set (bpy.context.scene.camera is None)"}
+                    from mathutils import Matrix
+                    saved_view_matrix = r3d.view_matrix.copy()
+                    saved_persp = r3d.view_perspective
+                    # Set the region's view to match the camera.
+                    r3d.view_matrix = cam.matrix_world.inverted()
+                    r3d.view_perspective = 'CAMERA'
+                    method = "offscreen_camera"
+
                 src_w, src_h = region.width, region.height
                 if max(src_w, src_h) > max_size:
                     s = max_size / max(src_w, src_h)
@@ -841,6 +898,10 @@ class BlenderMCPServer:
                     buf = offscreen.texture_color.read()
                 finally:
                     offscreen.free()
+                    # Restore the editor viewport if we swapped to camera view.
+                    if saved_view_matrix is not None:
+                        r3d.view_matrix = saved_view_matrix
+                        r3d.view_perspective = saved_persp
 
                 buf.dimensions = width * height * 4
                 pixels = np.asarray(buf, dtype=np.float32) / 255.0  # GPU buffer is 0..255
@@ -904,18 +965,19 @@ class BlenderMCPServer:
             # despite docs saying not to — this blocks them structurally.
             import re as _re
             if _re.search(r'bpy\.ops\.render\.render', code):
-                return (
+                return {"executed": False, "result": (
                     "BLOCKED: bpy.ops.render.render detected in execute_code. "
                     "Rendering via execute_code goes through the MCP bridge (~120s "
                     "timeout) and will time out, reset the connection, and crash "
-                    "Blender. Use the preview HTTP route instead:\n"
-                    "  POST /api/workspace/<id>/blender/preview\n"
-                    "  body: {\"settings\": {\"samples\": 16, \"resolution_x\": 960, "
-                    "\"resolution_y\": 540}}\n"
+                    "Blender. Use the preview route via nohup+run.py instead:\n"
+                    "  echo '{\"op\":\"preview\",\"settings\":{\"samples\":16,"
+                    "\"resolution_x\":960,\"resolution_y\":540}}' > request.json && "
+                    "nohup setsid bash -c 'cd /app/blender && uv run --project "
+                    "/app/blender python /app/blender/run.py \"<folder>\" --request "
+                    "request.json' >> pipeline.log 2>&1 &\n"
                     "Then poll state.json (phase: starting → rendering → gpu_ready) "
-                    "and exports/preview.png. The SKILL.md 'How to work' section has "
-                    "the full curl command."
-                )
+                    "and exports/preview.png. See SKILL.md 'How to work' for details."
+                )}
 
             # Create a local namespace for execution
             namespace = {"bpy": bpy}
