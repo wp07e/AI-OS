@@ -22,7 +22,18 @@ import { isBrandCardKey } from "@/lib/brand/cards";
 import { buildAutomationPrefill } from "@/lib/video/automation-prefill";
 
 export const runtime = "nodejs";
-export const maxDuration = 600;
+
+/**
+ * Wall-clock ceiling for a single streaming turn, in seconds. Enforced two ways:
+ *   - Next.js production/serverless `maxDuration` (ignored in `next dev`).
+ *   - the internal deadline loop in `drivePrompt` (runs everywhere, incl. dev).
+ * Keep these in sync via the shared `STREAM_DEADLINE_MS` constant below so the
+ * platform cap and the JS deadline can never drift apart. Long agentic turns
+ * (carousels, Blender, multi-step tool use) can run well past 10 minutes.
+ */
+const STREAM_DEADLINE_SECONDS = 30 * 60; // 30 minutes
+export const maxDuration = STREAM_DEADLINE_SECONDS;
+const STREAM_DEADLINE_MS = STREAM_DEADLINE_SECONDS * 1000;
 
 /**
  * Streaming message route. Replaces the old blocking POST that held a single
@@ -275,7 +286,7 @@ async function drivePrompt(
   // data flowing so the connection isn't dropped by an idle-timeout at any proxy
   // layer, and keeps the client's typing indicator alive during long generations
   // (the deterministic carousel script can run 3-4 minutes with no OpenCode events).
-  const deadline = Date.now() + 600_000;
+  const deadline = Date.now() + STREAM_DEADLINE_MS;
   let lastBeat = Date.now();
   while (!idle && !signal.aborted && Date.now() < deadline) {
     await sleep(200);
@@ -285,6 +296,29 @@ async function drivePrompt(
       // stay alive without scrolling the chat or producing visible "tool" text.
       // status "running" keeps the existing "working…" affordance going.
       send({ type: "tool", title: "Working", status: "running" });
+    }
+  }
+
+  // Deadline expired without the session going idle and without an abort. The
+  // OpenCode agent may still be running in the background (prompt_async is
+  // async), but this relay turn has reached its ceiling. Best-effort fetch
+  // whatever assistant text exists so far and emit `done` so the client
+  // finalizes cleanly instead of the stream closing silently (which previously
+  // left the UI looking frozen until the user sent a new message). The user can
+  // send a follow-up to re-engage the still-alive session.
+  if (!idle && !signal.aborted) {
+    log("drivePrompt — deadline expired before idle", {
+      sessionId,
+      deadlineMs: STREAM_DEADLINE_MS,
+    });
+    try {
+      const msgs = await listMessages(row.opencode_port, sessionId);
+      const partial = pickLastAssistant(msgs);
+      send({ type: "done", text: partial });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      log("listMessages — failed after deadline", { detail });
+      send({ type: "done", text: "" });
     }
   }
 

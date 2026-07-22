@@ -204,7 +204,15 @@ export interface OpencodeEvent {
  * end or abort). `signal`, if provided, aborts the underlying fetch.
  *
  * Per-request lifetime: the caller subscribes, drives one prompt to completion,
- * then stops. Reconnect logic is intentionally omitted (not needed here).
+ * then stops.
+ *
+ * Reconnect: if the /event stream ends or errors without the caller having
+ * stopped (i.e. an external abort), the subscription reconnects with
+ * exponential backoff (up to `MAX_RECONNECT_ATTEMPTS`). This prevents a
+ * transient drop of OpenCode's SSE stream from silently ending a long agent
+ * turn — the caller's wait loop keeps going and the post-idle `listMessages`
+ * fetch covers any frames missed during the reconnect gap. A caller-driven
+ * stop (external `signal` aborted, or `stop()` called) ends immediately.
  */
 export function subscribeEvents(
   port: number,
@@ -226,44 +234,90 @@ export function subscribeEvents(
     }
   };
 
+  const MAX_RECONNECT_ATTEMPTS = 5;
+  const BASE_BACKOFF_MS = 1_000;
+  const MAX_BACKOFF_MS = 30_000;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      // Resolve early if the caller aborts, so the backoff doesn't keep us waiting.
+      if (signal?.aborted) return resolve();
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true },
+      );
+    });
+
   (async () => {
-    try {
-      const res = await fetch(url, {
-        headers: { ...headers(), Accept: "text/event-stream" },
-        signal: controller.signal,
-      });
-      if (!res.ok || !res.body) {
-        throw new Error(`GET /event → ${res.status}`);
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-      // SSE frames are `data: <json>\n\n`. Buffer until we have a complete frame.
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        // `:` comment lines (heartbeats) are valid SSE keepalives — ignore them.
-        const frames = buf.split("\n\n");
-        buf = frames.pop() ?? "";
-        for (const frame of frames) {
-          const line = frame.split("\n").find((l) => l.startsWith("data:"));
-          if (!line) continue;
-          const jsonStr = line.slice("data:".length).trim();
-          if (!jsonStr) continue;
-          try {
-            const evt = JSON.parse(jsonStr) as OpencodeEvent;
-            if (evt && typeof evt.type === "string") onEvent(evt);
-          } catch {
-            /* malformed frame — skip, the stream is still usable */
+    let attempt = 0;
+    // Loop until the caller stops us. Each iteration is one SSE connection.
+    while (!stopped) {
+      try {
+        const res = await fetch(url, {
+          headers: { ...headers(), Accept: "text/event-stream" },
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          throw new Error(`GET /event → ${res.status}`);
+        }
+        // Connection succeeded — reset the backoff so a later drop starts fresh.
+        attempt = 0;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        // SSE frames are `data: <json>\n\n`. Buffer until we have a complete frame.
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          // `:` comment lines (heartbeats) are valid SSE keepalives — ignore them.
+          const frames = buf.split("\n\n");
+          buf = frames.pop() ?? "";
+          for (const frame of frames) {
+            const line = frame.split("\n").find((l) => l.startsWith("data:"));
+            if (!line) continue;
+            const jsonStr = line.slice("data:".length).trim();
+            if (!jsonStr) continue;
+            try {
+              const evt = JSON.parse(jsonStr) as OpencodeEvent;
+              if (evt && typeof evt.type === "string") onEvent(evt);
+            } catch {
+              /* malformed frame — skip, the stream is still usable */
+            }
           }
         }
+        // Stream ended cleanly (EOF) without the caller stopping. Fall through to
+        // the reconnect logic below.
+      } catch {
+        // A fetch/read error. If it's because the caller aborted the controller,
+        // we're done; otherwise it's a network drop → reconnect.
       }
-    } catch {
-      // Aborts (normal stop) and network drops both land here; nothing to do.
-    } finally {
-      stop();
+
+      if (stopped) break;
+      // Caller-driven stop: the external signal aborted. Don't reconnect.
+      if (signal?.aborted) break;
+
+      // Reconnect with exponential backoff (1s, 2s, 4s, 8s, 16s, capped 30s).
+      if (attempt >= MAX_RECONNECT_ATTEMPTS) {
+        console.warn(
+          `[opencode] /event SSE reconnect giving up after ${MAX_RECONNECT_ATTEMPTS} attempts`,
+        );
+        break;
+      }
+      const backoff = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** attempt);
+      attempt++;
+      console.warn(
+        `[opencode] /event SSE stream dropped — reconnecting in ${backoff}ms (attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS})`,
+      );
+      await sleep(backoff);
+      if (stopped || signal?.aborted) break;
     }
+    stop();
   })();
 
   return stop;

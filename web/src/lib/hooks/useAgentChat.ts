@@ -128,6 +128,11 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
       const decoder = new TextDecoder();
       let buf = "";
       let reasoningAccum = "";
+      // Tracks whether a terminal frame (`done`/`error`) was received. If the
+      // stream closes without one (e.g. an abrupt server-side disconnect), we
+      // finalize the in-flight assistant message so it can't get stuck showing a
+      // perpetual streaming indicator. The accumulated content is preserved.
+      let gotTerminalFrame = false;
 
       const updateAssistant = (fn: (m: ChatMessage) => ChatMessage) => {
         setMessagesBySession((m) => ({
@@ -179,6 +184,7 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
             const status = (evt.status as "running" | "completed" | "error") ?? "running";
             setStreaming({ assistantId, reasoningText: reasoningAccum, toolStatus: { title, status } });
           } else if (type === "done") {
+            gotTerminalFrame = true;
             const final = (evt.text as string) ?? "";
             updateAssistant((m) => ({
               ...m,
@@ -188,12 +194,21 @@ export function useAgentChat(sessionKey: string | null, transport: ChatTransport
             }));
             setStreaming(null);
           } else if (type === "error") {
+            gotTerminalFrame = true;
             const msg = (evt.message as string) ?? "stream error";
             setErrorBySession((m) => ({ ...m, [sKey]: msg }));
             updateAssistant((m) => ({ ...m, streaming: false, content: m.content || "(error)" }));
             setStreaming(null);
           }
         }
+      }
+      // Stream closed (reader EOF). If no terminal frame arrived, finalize the
+      // in-flight message so it can't hang in a streaming state. Keep whatever
+      // partial content streamed; the still-alive agent can be re-engaged with
+      // a follow-up message.
+      if (!gotTerminalFrame) {
+        updateAssistant((m) => ({ ...m, streaming: false, content: m.content || "(no response)" }));
+        setStreaming(null);
       }
     },
     [],
