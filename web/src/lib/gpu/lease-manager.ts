@@ -1144,7 +1144,10 @@ __STATE_EOF__`;
         container,
         ["bash", "-lc", `${sshOpts} root@${lease.ssh_host} 'ls -la /root/blender/renders/ 2>/dev/null' 2>/dev/null`],
         { user: APP_USER },
-      ).catch(() => ({ code: 0, stdout: "", stderr: "" }));
+      ).catch((e) => {
+        console.warn(`[lease-manager] syncDown: ssh ls /root/blender/renders/ failed for ${lease.instance_id}: ${(e as Error).message}`);
+        return { code: 1, stdout: "", stderr: "" };
+      });
 
       // Parse `ls -la` output: each line is "perms links owner group SIZE DATE NAME"
       const remoteFiles: Array<{ name: string; size: number }> = [];
@@ -1159,12 +1162,20 @@ __STATE_EOF__`;
 
       for (const { name, size: remoteSize } of remoteFiles) {
         const localSize = await localFileSize(container, `${folder}/exports/${name}`);
-        if (remoteSize !== localSize) {
-          await exec(
+        // preview.png is overwritten on every render — even if the byte size
+        // matches a stale copy (possible with fixed sample counts), re-transfer
+        // it so the canvas always shows the latest render. For other files,
+        // skip when size matches to save egress.
+        const isPreview = name === "preview.png";
+        if (remoteSize !== localSize || isPreview) {
+          const r = await exec(
             container,
             ["bash", "-lc", `scp ${scpOpts} 'root@${lease.ssh_host}:/root/blender/renders/${name}' '${folder}/exports/${name}'`],
             { user: APP_USER },
-          ).catch(() => {}); // best-effort
+          );
+          if (r.code !== 0) {
+            console.warn(`[lease-manager] syncDown: scp renders/${name} failed for ${lease.instance_id}: ${r.stderr.trim() || `exit ${r.code}`}`);
+          }
         }
       }
 

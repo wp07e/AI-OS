@@ -217,8 +217,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This SHA includes: (1) aim_camera_at + apply_scale_safe tools, AND (2) the
 # viewport-screenshot base64-over-socket fix + BLENDER_SCREENSHOT_DIR path
 # return, AND (3) aim_camera_at auto-distance from bounding box, AND (4)
-# get_viewport_screenshot from_camera parameter for camera-view verification.
-ARG BLENDER_MCP_REF=4d1dc7f31541ec685bb9a83af63a4e85eec79941
+# get_viewport_screenshot from_camera parameter, AND (5) execute_code render
+# block at MCP server layer (not addon — run.py's direct-socket renders must
+# NOT be blocked).
+ARG BLENDER_MCP_REF=6e16dd7e0c2787e24500d8ebdd2fcf256f83e059
 # The Blender version the GPU onstart script downloads (NOT apt — apt only has
 # 3.0.1 on Ubuntu 22.04). Downloaded from blender.org at instance boot time.
 # Set to "latest-4.5" to auto-resolve, or pin to a specific version like "4.5.11".

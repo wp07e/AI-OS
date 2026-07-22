@@ -954,31 +954,8 @@ class BlenderMCPServer:
 
     def execute_code(self, code):
         """Execute arbitrary Blender Python code"""
-        # This is powerful but potentially dangerous - use caution
+        # This is powerful but potentially dangerous - use with caution
         try:
-            # Block direct renders: bpy.ops.render.render goes through the MCP
-            # bridge (~120s timeout), which complex scenes exceed — it times
-            # out, resets the connection, and crashes Blender. The agent should
-            # use the preview HTTP route (POST /api/workspace/<id>/blender/preview)
-            # instead, which background-launches run.py with a 600s budget and
-            # never blocks the socket. Agents repeatedly try execute_code renders
-            # despite docs saying not to — this blocks them structurally.
-            import re as _re
-            if _re.search(r'bpy\.ops\.render\.render', code):
-                return {"executed": False, "result": (
-                    "BLOCKED: bpy.ops.render.render detected in execute_code. "
-                    "Rendering via execute_code goes through the MCP bridge (~120s "
-                    "timeout) and will time out, reset the connection, and crash "
-                    "Blender. Use the preview route via nohup+run.py instead:\n"
-                    "  echo '{\"op\":\"preview\",\"settings\":{\"samples\":16,"
-                    "\"resolution_x\":960,\"resolution_y\":540}}' > request.json && "
-                    "nohup setsid bash -c 'cd /app/blender && uv run --project "
-                    "/app/blender python /app/blender/run.py \"<folder>\" --request "
-                    "request.json' >> pipeline.log 2>&1 &\n"
-                    "Then poll state.json (phase: starting → rendering → gpu_ready) "
-                    "and exports/preview.png. See SKILL.md 'How to work' for details."
-                )}
-
             # Create a local namespace for execution
             namespace = {"bpy": bpy}
 
