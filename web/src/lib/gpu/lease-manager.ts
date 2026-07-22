@@ -953,6 +953,7 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
   ): Promise<boolean> {
     const pollMs = Number(process.env.GPU_POLL_INTERVAL_MS ?? 5000);
     const sshOpts = `ssh -i ${SSH_KEY_PATH} -p ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
+    const scpOpts = `-i ${SSH_KEY_PATH} -P ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
     const ssh = (cmd: string) =>
       exec(container, ["bash", "-lc", `${sshOpts} root@${target.host} '${cmd.replace(/'/g, "'\\''")}' 2>&1`], {
         user: APP_USER,
@@ -962,21 +963,45 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
     //    false-positive from the previous Blender session.
     await ssh("rm -f /root/.blender-mcp-ready");
 
-    // 2. Kill any stale Blender process. Wait for it to actually die.
-    await ssh("pkill -f blender 2>/dev/null; sleep 2");
+    // 2. Kill stale Blender. CRITICAL: use pgrep -f "/opt/blender/blender" NOT
+    //    pkill -f blender — the latter matches the SSH command itself (which
+    //    contains "blender" in the script path), killing the SSH session before
+    //    it can relaunch Blender. This was the root cause of the restart
+    //    crash-loop: every watchdog tick spawned a stuck SSH process that
+    //    killed itself.
+    await ssh('pgrep -f "/opt/blender/blender" | xargs -r kill 2>/dev/null; sleep 2');
 
-    // 3. Relaunch Blender. Load the saved scene.blend if it exists so the
-    //    agent's last-saved work is preserved (start_blender_mcp.py will
-    //    re-enable the addon and restart the socket server on the loaded scene).
-    const relaunchCmd = [
-      "if [ -f /root/blender/scene.blend ]; then",
+    // 3. Write a standalone restart script locally, SCP it to the GPU instance,
+    //    then execute it in a separate SSH call. This avoids nested shell
+    //    quoting issues (a heredoc inside an SSH command inside a bash -lc
+    //    command has 3 levels of quoting that break if/then/fi and variable
+    //    expansion) and ensures the backgrounded Blender process fully detaches
+    //    from the SSH session (setsid + full fd redirect).
+    const scriptContent = [
+      "#!/bin/bash",
+      "LOG=/root/onstart.log",
+      "export DISPLAY=:99",
+      "export BLENDER_PORT=9876",
+      'if [ -f /root/blender/scene.blend ]; then',
       "  BLENDER_FILE=/root/blender/scene.blend",
       "else",
       "  BLENDER_FILE=",
       "fi",
-      "DISPLAY=:99 BLENDER_PORT=9876 nohup /opt/blender/blender $BLENDER_FILE --python /root/start_blender_mcp.py >>/root/onstart.log 2>&1 &",
-    ].join("; ");
-    await ssh(relaunchCmd);
+      // setsid creates a new session so Blender survives SSH disconnect.
+      // Full fd redirect (</dev/null >>log 2>&1) prevents SSH from keeping
+      // the channel open waiting for the child's stdout/stderr to close.
+      'setsid /opt/blender/blender $BLENDER_FILE --python /root/start_blender_mcp.py >>"$LOG" 2>&1 </dev/null &',
+      'echo "RESTART_RAN_$(date +%s)" > /tmp/restart_marker.txt',
+    ].join("\n");
+    // Write the script locally in the container, then SCP + execute.
+    const writeCmd = `cat > /tmp/gpu_restart.sh <<'HEREDOC_END'\n${scriptContent}\nHEREDOC_END`;
+    await exec(container, ["bash", "-lc", writeCmd], { user: APP_USER });
+    await exec(
+      container,
+      ["bash", "-lc", `scp ${scpOpts} /tmp/gpu_restart.sh root@${target.host}:/root/gpu_restart.sh`],
+      { user: APP_USER },
+    ).catch(() => {});
+    await ssh("chmod +x /root/gpu_restart.sh && bash /root/gpu_restart.sh");
 
     // 4. Poll the add-on socket directly on the GPU instance (not the tunnel —
     //    the tunnel is a separate concern). The socket accepting a real

@@ -1251,13 +1251,16 @@ describe("lease manager: watchdog tunnel probe retry", () => {
     await new Promise((r) => setTimeout(r, 30));
 
     const calls = (exec as unknown as ReturnType<typeof vi.fn>).mock.calls;
-    // restartBlender SSHed into the instance to kill stale Blender.
+    // restartBlender SSHed into the instance to kill stale Blender. Uses
+    // pgrep -f "/opt/blender/blender" (NOT pkill -f blender, which would kill
+    // the SSH session itself since the command line contains "blender").
     const killBlenderCall = calls.find((c: unknown[]) => {
       const cmd = c[1] as string[];
-      return cmd[0] === "bash" && cmd[2]?.includes("ssh ") && cmd[2]?.includes("pkill -f blender");
+      return cmd[0] === "bash" && cmd[2]?.includes("ssh ") && cmd[2]?.includes("pgrep -f");
     });
     expect(killBlenderCall).toBeDefined();
-    // restartBlender SSHed in to relaunch Blender with the startup script.
+    // restartBlender SCP'd a restart script and executed it. The script
+    // contains the Blender launch command with start_blender_mcp.py.
     const relaunchCall = calls.find((c: unknown[]) => {
       const cmd = c[1] as string[];
       return cmd[0] === "bash" && cmd[2]?.includes("start_blender_mcp.py");
