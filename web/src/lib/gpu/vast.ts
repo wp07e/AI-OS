@@ -178,6 +178,14 @@ export interface VastClient {
   stopInstance(id: number, transport?: Transport): Promise<void>;
   /** Resume a paused instance (re-runs onstart). */
   startInstance(id: number, transport?: Transport): Promise<void>;
+  /**
+   * Reboot a running/loaded instance: docker stop+start on the host (data
+   * preserved). Cheaper than destroy+re-create, and recovers hosts where the
+   * container is stuck but the underlying GPU/driver needs a kick. Used by the
+   * lease-manager escalation ladder after repeated init failures on the same
+   * machine_id but before blacklisting the host.
+   */
+  rebootInstance(id: number, transport?: Transport): Promise<void>;
   /** Permanently destroy an instance and stop ALL billing. */
   destroyInstance(id: number, transport?: Transport): Promise<void>;
   /** Parse the ssh url for an instance. */
@@ -281,13 +289,18 @@ export function createVastClient(baseTransport: Transport = defaultTransport): V
         }
       }
       // Defensive re-filter: enforce the cap and per-GPU CUDA floor in code.
+      // Also exclude any blacklisted physical hosts (machine_id) so a known-bad
+      // machine that fails init repeatedly is never re-picked. vastai's query DSL
+      // has no "machine_id not in (...)" operator, so the exclusion is in code.
       const maxDph = opts.maxDph ?? DEFAULT_MAX_DPH;
       const allowed = new Set(gpus.map((g) => g.toLowerCase()));
+      const exclude = new Set((opts.excludeMachineIds ?? []).map(Number));
       const filtered = allOffers.filter((o) => {
         if (o.dph_total > maxDph) return false;
         const gpuFloor = minCudaFor(o.gpu_name);
         if ((o.cuda_max_good ?? 0) < gpuFloor) return false;
         if (!allowed.has((o.gpu_name ?? "").toLowerCase())) return false;
+        if (o.machine_id != null && exclude.has(o.machine_id)) return false;
         return true;
       });
       // Sort by perf-per-dollar descending (best value first), then by price.
@@ -397,6 +410,17 @@ export function createVastClient(baseTransport: Transport = defaultTransport): V
       const res = await transport(["start", "instance", String(id), "--raw"]);
       if (res.code !== 0 && !/already|running/i.test(res.stderr + res.stdout)) {
         throw new VastError(`start instance ${id} failed`, res.code, res.stderr);
+      }
+    },
+
+    async rebootInstance(id, transport = baseTransport) {
+      // reboot = docker stop+start on the host; data preserved. vastai prints a
+      // Python-dict confirmation (non-JSON), so we check the exit code directly
+      // rather than using runJson. Tolerate "already"/"running"/"booting" in the
+      // output (an instance already mid-reboot is a no-op success).
+      const res = await transport(["reboot", "instance", String(id)]);
+      if (res.code !== 0 && !/already|running|booting|reboot/i.test(res.stderr + res.stdout)) {
+        throw new VastError(`reboot instance ${id} failed`, res.code, res.stderr);
       }
     },
 

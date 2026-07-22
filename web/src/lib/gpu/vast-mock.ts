@@ -48,7 +48,19 @@ const FAIL_DESTROY = process.env.AIOS_TEST_VAST_FAIL_DESTROY === "1";
 
 // ── In-memory instance store ────────────────────────────────────────────────
 
-interface MockInstance extends Instance {
+/**
+ * The mock models a transient "booting" phase (booting→running after BOOT_MS)
+ * that the real vast.ai CLI folds into "loading". InstanceState doesn't include
+ * "booting", so MockInstance widens cur_state to include it. The public methods
+ * narrow back to InstanceState when returning to callers.
+ */
+type MockState = InstanceState | "booting";
+
+interface MockInstance {
+  id: number;
+  cur_state: MockState;
+  gpu_name?: string;
+  dph_total?: number;
   createdAt: number;
   destroyedAt: number | null;
 }
@@ -60,6 +72,15 @@ const SSH_KEYS = new Map<number, string>();
 let nextKeyId = 9000;
 
 /**
+ * Deterministic distinct machine_ids for mock offers, cycled so each
+ * createInstance gets a different physical host unless excluded. Tests rely on
+ * this to exercise the escalation ladder (same machine fails twice → reboot →
+ * blacklist → different machine acquired).
+ */
+const MOCK_MACHINE_IDS = [7000, 7001, 7002];
+let nextOfferId = 100;
+
+/**
  * Reset all in-memory state. Tests call this in beforeEach (via the test
  * helper) so each test starts from a clean slate. No-op in production since
  * the mock isn't loaded there.
@@ -69,6 +90,7 @@ export function resetMockVastState(): void {
   SSH_KEYS.clear();
   nextId = 1000;
   nextKeyId = 9000;
+  nextOfferId = 100;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -83,11 +105,19 @@ export function createMockVastClient(): VastClient {
       return { api_key: "mock-key", credit: 100.0, mock: true };
     },
 
-    async searchOffers(): Promise<Offer[]> {
-      // A single cheap qualifying offer. Keeps tests deterministic and fast.
-      return [
-        {
-          id: 100,
+    async searchOffers(opts: { excludeMachineIds?: number[] } = {}): Promise<Offer[]> {
+      // Return one offer per mock machine_id, skipping any that are excluded
+      // (blacklisted). Each offer carries a distinct machine_id so the escalation
+      // ladder can be exercised deterministically: the same offer isn't reused
+      // (offers are single-use), but the same machine_id repeats across offers
+      // until blacklisted.
+      const exclude = new Set((opts.excludeMachineIds ?? []).map(Number));
+      const offers: Offer[] = [];
+      for (const machineId of MOCK_MACHINE_IDS) {
+        if (exclude.has(machineId)) continue;
+        offers.push({
+          id: nextOfferId++,
+          machine_id: machineId,
           gpu_name: "RTX 4060 Ti",
           num_gpus: 1,
           dph_total: 0.081,
@@ -95,8 +125,9 @@ export function createMockVastClient(): VastClient {
           dlperf_per_dphtotal: 617,
           cuda_max_good: 12.6,
           rentable: true,
-        },
-      ];
+        });
+      }
+      return offers;
     },
 
     async createInstance(opts: CreateInstanceOptions): Promise<{ id: number }> {
@@ -104,15 +135,14 @@ export function createMockVastClient(): VastClient {
         throw new Error("[mock-vast] createInstance failed (AIOS_TEST_VAST_FAIL_CREATE=1)");
       }
       const id = nextId++;
-      const now = Date.now();
       instances.set(id, {
         id,
         // Born "booting" (provisioning). Transition to running after BOOT_MS.
         // The lease manager polls getInstance / waitForRunning.
-        cur_state: "booting" as InstanceState,
+        cur_state: "booting",
         gpu_name: "RTX 4060 Ti",
         dph_total: 0.081,
-        createdAt: now,
+        createdAt: Date.now(),
         destroyedAt: null,
       });
       // Reference opts.image/label so unused-var lint doesn't fire; the real
@@ -127,9 +157,9 @@ export function createMockVastClient(): VastClient {
       if (!inst || inst.destroyedAt !== null) return null;
       // Promote booting→running once BOOT_MS has elapsed since creation.
       if (inst.cur_state === "booting" && Date.now() - inst.createdAt >= BOOT_MS) {
-        inst.cur_state = "running" as InstanceState;
+        inst.cur_state = "running";
       }
-      return { ...inst };
+      return { ...inst, cur_state: inst.cur_state as InstanceState };
     },
 
     async listInstances(): Promise<Instance[]> {
@@ -137,9 +167,9 @@ export function createMockVastClient(): VastClient {
       for (const inst of instances.values()) {
         if (inst.destroyedAt !== null) continue;
         if (inst.cur_state === "booting" && Date.now() - inst.createdAt >= BOOT_MS) {
-          inst.cur_state = "running" as InstanceState;
+          inst.cur_state = "running";
         }
-        out.push({ ...inst });
+        out.push({ ...inst, cur_state: inst.cur_state as InstanceState });
       }
       return out;
     },
@@ -157,12 +187,24 @@ export function createMockVastClient(): VastClient {
 
     async stopInstance(id: number): Promise<void> {
       const inst = instances.get(id);
-      if (inst) inst.cur_state = "paused" as InstanceState;
+      if (inst) inst.cur_state = "paused";
     },
 
     async startInstance(id: number): Promise<void> {
       const inst = instances.get(id);
-      if (inst) inst.cur_state = "running" as InstanceState;
+      if (inst) inst.cur_state = "running";
+    },
+
+    async rebootInstance(id: number): Promise<void> {
+      // Reboot = docker stop+start: data preserved, but the instance goes back
+      // through the boot phase (booting→running after BOOT_MS). Mirrors the real
+      // vastai reboot semantics so the escalation ladder's post-reboot init wait
+      // is exercised realistically.
+      const inst = instances.get(id);
+      if (inst && inst.destroyedAt === null) {
+        inst.cur_state = "booting";
+        inst.createdAt = Date.now();
+      }
     },
 
     async destroyInstance(id: number): Promise<void> {

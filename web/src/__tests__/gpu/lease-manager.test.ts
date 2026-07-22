@@ -36,6 +36,7 @@ import type { ContainerRow } from "@/lib/db";
 function fakeOffer(over: Partial<Offer> = {}): Offer {
   return {
     id: 100,
+    machine_id: 7000,
     gpu_name: "RTX 4060",
     num_gpus: 1,
     dph_total: 0.07,
@@ -77,6 +78,7 @@ function mockVast(overrides: Partial<VastClient> = {}): VastClient & {
     waitForRunning: vi.fn(async (): Promise<Instance> => fakeInstance()),
     stopInstance: vi.fn(async () => undefined),
     startInstance: vi.fn(async () => undefined),
+    rebootInstance: vi.fn(async () => undefined),
     destroyInstance: vi.fn(async () => undefined),
     sshUrl: vi.fn(async (): Promise<{ host: string; port: number } | null> => ({
       host: "1.2.3.4",
@@ -200,6 +202,7 @@ beforeAll(() => {
 beforeEach(() => {
   // Clear all rows so each test starts from a clean slate. Keep the schema.
   db().prepare("DELETE FROM gpu_leases").run();
+  db().prepare("DELETE FROM gpu_machine_health").run();
   db().prepare("DELETE FROM workflow_instances").run();
   db().prepare("DELETE FROM containers").run();
   db().prepare("DELETE FROM users").run();
@@ -1272,4 +1275,172 @@ describe("lease manager: watchdog tunnel probe retry", () => {
     expect(lease?.state).toBe("ready");
   });
 });
+
+// ── Init-failure escalation ladder (reboot → blacklist → give up) ───────────
+
+/**
+ * A mock vast whose bringInstanceOnline path FAILS by making sshUrl return null
+ * (→ "instance X has no ssh url" throw). `sshUrlFailCount` controls how many
+ * sshUrl calls fail before it starts returning a real target. Since the reboot
+ * tier reuses the SAME instance (no new createInstance), keying on sshUrl call
+ * count (not createInstance count) correctly models "reboot fixed it".
+ *
+ * searchOffers returns offers with distinct machine_ids from `machineIds`,
+ * cycling and skipping any in excludeMachineIds. This lets tests exercise the
+ * full ladder: same machine fails → reboot → blacklist → different machine.
+ */
+function flakyInitVast(opts: {
+  machineIds: number[];
+  sshUrlFailCount: number; // sshUrl returns null for the first N calls, then a target
+}): VastClient & { mocks: Record<string, ReturnType<typeof vi.fn>> } {
+  let sshCallCount = 0;
+  let createCount = 0;
+  let offerIdx = 0;
+  const mocks = {
+    showUser: vi.fn(async () => ({})),
+    searchOffers: vi.fn(async (searchOpts: { excludeMachineIds?: number[] } = {}): Promise<Offer[]> => {
+      const exclude = new Set((searchOpts.excludeMachineIds ?? []).map(Number));
+      // Find the next machine_id not excluded.
+      for (let i = 0; i < opts.machineIds.length; i++) {
+        const idx = (offerIdx + i) % opts.machineIds.length;
+        const mid = opts.machineIds[idx];
+        if (!exclude.has(mid)) {
+          offerIdx = idx + 1;
+          return [fakeOffer({ id: 100 + createCount, machine_id: mid })];
+        }
+      }
+      return [];
+    }),
+    createInstance: vi.fn(async (): Promise<{ id: number }> => {
+      const id = 500 + createCount;
+      createCount++;
+      return { id };
+    }),
+    getInstance: vi.fn(async (id: number): Promise<Instance | null> => fakeInstance({ id })),
+    listInstances: vi.fn(async (): Promise<Instance[]> => [fakeInstance()]),
+    waitForRunning: vi.fn(async (id: number): Promise<Instance> => fakeInstance({ id })),
+    stopInstance: vi.fn(async () => undefined),
+    startInstance: vi.fn(async () => undefined),
+    rebootInstance: vi.fn(async () => undefined),
+    destroyInstance: vi.fn(async () => undefined),
+    sshUrl: vi.fn(async (): Promise<{ host: string; port: number } | null> => {
+      sshCallCount++;
+      if (sshCallCount <= opts.sshUrlFailCount) return null;
+      return { host: "1.2.3.4", port: 12345 };
+    }),
+    createSshKey: vi.fn(async (): Promise<{ id: number }> => ({ id: 999 })),
+    deleteSshKey: vi.fn(async () => undefined),
+    attachSshKey: vi.fn(async () => undefined),
+    listSshKeys: vi.fn(async (): Promise<Array<{ id: number; public_key: string }>> => []),
+  };
+  const client = mocks as unknown as VastClient & { mocks: typeof mocks };
+  client.mocks = mocks;
+  return client;
+}
+
+describe("lease manager: init-failure escalation ladder", () => {
+  // These tests use a DISTINCT instance id ("inst-esc") to avoid colliding with
+  // the module-level `inflight` lock map that prior tests (using "inst-1") may
+  // have left populated. They do NOT start background loops (which would make
+  // sshUrl call counts non-deterministic); instead they pump via retryQueued.
+  const LADDER_OPTS = {
+    exec: mockExec(),
+    fileOps: mockFileOps(),
+    rebootFailThreshold: 2,
+    rebootWaitMs: 1000,
+  };
+
+  // Seed the escalation lane before each test (beforeEach only seeds inst-1).
+  beforeEach(() => {
+    db().prepare(
+      "INSERT INTO workflow_instances (id, user_id, workflow_type, title, folder) VALUES ('inst-esc', 1, 'blender', 'Esc', '/workspace/blends/inst-esc')",
+    ).run();
+  });
+
+  it("reboots the instance after 2 same-machine failures, then recovers", async () => {
+    // sshUrl fails twice (2 init failures on machine 7000), then succeeds on
+    // the reboot's bringInstanceOnline (3rd sshUrl call).
+    const vast = flakyInitVast({ machineIds: [7000], sshUrlFailCount: 2 });
+    const mgr = createLeaseManager({ vast, ...LADDER_OPTS });
+
+    // Attempt 1: acquire → init fails → queued (fail 1).
+    await mgr.acquire({ instanceId: "inst-esc", userId: 1, container: fakeContainer(), resume: false });
+    expect(mgr.get("inst-esc")?.state).toBe("queued");
+    // Attempt 2: retry → init fails again → reboot → bringInstanceOnline succeeds.
+    await mgr.retryQueued("inst-esc");
+    const lease = mgr.get("inst-esc");
+    expect(vast.mocks.rebootInstance).toHaveBeenCalledOnce();
+    expect(lease?.state).toBe("ready");
+    expect(lease?.machine_fail_count).toBe(0);
+    expect(lease?.escalation_stage).toBe("fresh");
+  });
+
+  it("blacklists the machine when reboot fails, then acquires a different machine", async () => {
+    // sshUrl fails 3 times: attempt 1 (fail), attempt 2 + reboot (fail), then
+    // attempt 3 on a different machine succeeds.
+    const vast = flakyInitVast({ machineIds: [7000, 7001], sshUrlFailCount: 3 });
+    const mgr = createLeaseManager({ vast, ...LADDER_OPTS });
+
+    await mgr.acquire({ instanceId: "inst-esc", userId: 1, container: fakeContainer(), resume: false });
+    // Attempt 2: retry → fails again → reboot → post-reboot init fails → blacklist → queued (post_blacklist).
+    await mgr.retryQueued("inst-esc");
+    expect(mgr.get("inst-esc")?.escalation_stage).toBe("post_blacklist");
+    // Bad machine blacklisted.
+    const blacklisted = db()
+      .prepare("SELECT blacklisted FROM gpu_machine_health WHERE machine_id = 7000")
+      .get() as { blacklisted: number } | undefined;
+    expect(blacklisted?.blacklisted).toBe(1);
+    // Attempt 3: retry → different machine 7001 → init succeeds → ready.
+    await mgr.retryQueued("inst-esc");
+    const lease = mgr.get("inst-esc");
+    expect(lease?.state).toBe("ready");
+    expect(lease?.machine_id).toBe(7001);
+    expect(lease?.escalation_stage).toBe("fresh");
+  });
+
+  it("gives up (destroyed + manually_released) when the post-blacklist machine also fails", async () => {
+    // sshUrl always fails → 7000 fails 2x → reboot fails → blacklist → 7001 fails → gave_up.
+    const vast = flakyInitVast({ machineIds: [7000, 7001], sshUrlFailCount: 999 });
+    const mgr = createLeaseManager({ vast, ...LADDER_OPTS });
+
+    await mgr.acquire({ instanceId: "inst-esc", userId: 1, container: fakeContainer(), resume: false });
+    await mgr.retryQueued("inst-esc"); // → blacklist 7000, post_blacklist
+    await mgr.retryQueued("inst-esc"); // → 7001 fails, gave_up
+
+    const lease = mgr.get("inst-esc");
+    expect(lease?.state).toBe("destroyed");
+    expect(lease?.manually_released).toBe(1);
+    expect(lease?.escalation_stage).toBe("gave_up");
+    expect(lease?.last_error).toMatch(/gave up|Click Acquire/i);
+  });
+
+  it("explicit re-acquire resets the escalation stage to fresh", async () => {
+    // Seed a lease at destroyed + manually_released + post_blacklist (prior give-up).
+    db()
+      .prepare(
+        `INSERT INTO gpu_leases (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port,
+         queue_position, queue_requested_at, queue_last_checked_at, queue_search_error,
+         acquired_at, last_activity, last_synced_at, last_error, manually_released, releasing_since,
+         machine_id, machine_fail_count, escalation_stage)
+         VALUES ('inst-esc', 1, 'destroyed', NULL, NULL, NULL, NULL, NULL,
+         NULL, NULL, NULL, NULL, 0, 0, NULL, 'gave up', 1, NULL,
+         7000, 2, 'post_blacklist')`,
+      )
+      .run();
+    const vast = mockVast();
+    const mgr = createLeaseManager({ vast, exec: mockExec(), fileOps: mockFileOps() });
+    const lease = await mgr.acquire({
+      instanceId: "inst-esc",
+      userId: 1,
+      container: fakeContainer(),
+      resume: true,
+    });
+    expect(lease.state).toBe("ready");
+    expect(lease.manually_released).toBe(0);
+    expect(lease.escalation_stage).toBe("fresh");
+    expect(lease.machine_fail_count).toBe(0);
+  });
+});
+
+
 

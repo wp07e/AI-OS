@@ -60,6 +60,7 @@ export function useTempDb(): string {
 export function fakeOffer(over: Partial<Offer> = {}): Offer {
   return {
     id: 100,
+    machine_id: 7000,
     gpu_name: "RTX 4060 Ti",
     num_gpus: 1,
     dph_total: 0.081,
@@ -115,6 +116,7 @@ export function mockVast(overrides: Partial<VastClient> = {}): VastClient & {
     waitForRunning: vi.fn(async (id: number): Promise<Instance> => fakeInstance({ id })),
     stopInstance: vi.fn(async () => undefined),
     startInstance: vi.fn(async () => undefined),
+    rebootInstance: vi.fn(async () => undefined),
     destroyInstance: vi.fn(async () => undefined),
     sshUrl: vi.fn(async (): Promise<{ host: string; port: number } | null> => ({
       host: "1.2.3.4",
@@ -246,6 +248,7 @@ export function seedForTest(
   lanes: Array<{ id: string; title?: string }> = [{ id: "inst-1" }],
 ): void {
   db().prepare("DELETE FROM gpu_leases").run();
+  db().prepare("DELETE FROM gpu_machine_health").run();
   db().prepare("DELETE FROM workflow_instances").run();
   db().prepare("DELETE FROM containers").run();
   db().prepare("DELETE FROM users").run();

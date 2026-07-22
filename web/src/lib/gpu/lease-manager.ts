@@ -14,6 +14,15 @@
  *     cheaper than re-provisioning); detects destroyed instances and
  *     re-provisions fresh with the last-synced .blend pushed up (continue where
  *     you left off); detects dead tunnels and re-establishes them.
+ *   - **Init-failure escalation ladder**: if a freshly-rented instance keeps
+ *     failing to initialize on the SAME physical machine (machine_id), the
+ *     system escalates rather than looping forever — (1) destroy+re-queue up to
+ *     REBOOT_FAIL_THRESHOLD attempts, (2) rebootInstance (docker stop+start,
+ *     data preserved) and retry init once, (3) on reboot failure blacklist the
+ *     machine_id globally and acquire a DIFFERENT machine, (4) if that one also
+ *     fails, give up and surface "Acquire GPU" to the user. The blacklist is
+ *     persisted in gpu_machine_health with a TTL, so a flaky host is not
+ *     re-picked even after a lane destroy or process restart.
  *   - **Artifact sync safety**: the GPU instance is pure ephemeral scratch. The
  *     container's /workspace/blends/<id>/ is the durable source of truth.
  *     Periodic background sync-down (60s) bounds data loss; on release the
@@ -47,6 +56,32 @@ import type { LeaseState, Offer } from "./types";
 /** Default max ms a lease may stay queued before giving up (10 minutes).
  *  Overridable via GPU_QUEUE_TIMEOUT_MS env in production. */
 const DEFAULT_QUEUE_TIMEOUT_MS = Number(process.env.GPU_QUEUE_TIMEOUT_MS ?? 600_000);
+
+/**
+ * Init-failure escalation stages. Drives the ladder in provisionInstance:
+ *   fresh          → destroy+re-queue (incrementing machine_fail_count)
+ *   rebooting      → after REBOOT_FAIL_THRESHOLD same-machine failures, reboot
+ *                    the instance (docker stop+start) and retry init once
+ *   post_blacklist → reboot failed → blacklist machine_id globally → next
+ *                    searchOffers excludes it → acquire a different machine
+ *   gave_up        → the post_blacklist different-machine attempt also failed;
+ *                    terminal, surfaces "Acquire GPU" to the user
+ */
+export type EscalationStage = "fresh" | "rebooting" | "post_blacklist" | "gave_up";
+
+/** Consecutive same-machine init failures before trying a reboot. Default 2. */
+const DEFAULT_REBOOT_FAIL_THRESHOLD = Number(process.env.GPU_REBOOT_FAIL_THRESHOLD ?? 2);
+
+/** How long a blacklisted machine_id is avoided before it becomes re-eligible.
+ *  A flaky host may recover, so the blacklist expires rather than being
+ *  permanent. Default 1 hour. Query-time expiry (no cron). */
+const DEFAULT_MACHINE_BLACKLIST_TTL_MS = Number(
+  process.env.GPU_MACHINE_BLACKLIST_TTL_MS ?? 60 * 60 * 1000,
+);
+
+/** Max ms to wait for a rebooted instance to reach running + SSH + socket.
+ *  Default 5 min (matches the per-stage waits). */
+const DEFAULT_REBOOT_WAIT_MS = Number(process.env.GPU_REBOOT_WAIT_MS ?? 5 * 60 * 1000);
 
 // ── DB row type (mirrors the gpu_leases table) ──────────────────────────────
 
@@ -91,6 +126,26 @@ export interface LeaseRow {
    * the old last_activity-only stranded check).
    */
   releasing_since: number | null;
+  /**
+   * vast.ai physical host id of the instance currently/pendingly provisioned
+   * for this lease. Set at createInstance time from offer.machine_id so the
+   * escalation ladder can detect "the same flaky machine was re-picked" across a
+   * destroy+re-create cycle. Nulled on release.
+   */
+  machine_id: number | null;
+  /**
+   * Consecutive init failures observed on the SAME machine_id. Incremented on
+   * each destroy+re-queue when the next attempt picks the same machine; reset to
+   * 0 when a different machine is picked or init succeeds.
+   */
+  machine_fail_count: number;
+  /**
+   * Init-failure escalation stage: 'fresh' (normal), 'rebooting' (about to /
+   * just rebooted the same machine), 'post_blacklist' (bad machine was
+   * blacklisted, now trying a different machine), 'gave_up' (terminal — surface
+   * to user). See the escalation ladder in provisionInstance.
+   */
+  escalation_stage: EscalationStage;
 }
 
 const now = () => Date.now();
@@ -139,6 +194,12 @@ export interface LeaseManagerConfig {
   destroyRetries?: number;
   /** Base backoff ms for destroyInstanceWithRetry: delay = base * (attempt) (default 1500). */
   destroyBackoffMs?: number;
+  /** Consecutive same-machine init failures before rebooting the instance (default 2). */
+  rebootFailThreshold?: number;
+  /** How long a blacklisted machine_id is avoided (default 1h). */
+  machineBlacklistTtlMs?: number;
+  /** Max ms to wait for a rebooted instance to come back up (default 5 min). */
+  rebootWaitMs?: number;
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -209,11 +270,11 @@ function upsertLease(row: LeaseRow): void {
          (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, ssh_key_id,
           queue_position, queue_requested_at, queue_last_checked_at, queue_search_error,
           acquired_at, last_activity, last_synced_at, last_error,
-          manually_released, releasing_since)
+          manually_released, releasing_since, machine_id, machine_fail_count, escalation_stage)
        VALUES (@instance_id, @user_id, @state, @vast_id, @gpu_name, @dph, @ssh_host, @ssh_port, @ssh_key_id,
           @queue_position, @queue_requested_at, @queue_last_checked_at, @queue_search_error,
           @acquired_at, @last_activity, @last_synced_at, @last_error,
-          @manually_released, @releasing_since)
+          @manually_released, @releasing_since, @machine_id, @machine_fail_count, @escalation_stage)
        ON CONFLICT(instance_id) DO UPDATE SET
          state=excluded.state, vast_id=excluded.vast_id, gpu_name=excluded.gpu_name,
          dph=excluded.dph, ssh_host=excluded.ssh_host, ssh_port=excluded.ssh_port,
@@ -223,7 +284,10 @@ function upsertLease(row: LeaseRow): void {
          queue_search_error=excluded.queue_search_error,
          last_activity=excluded.last_activity, last_synced_at=excluded.last_synced_at,
          last_error=excluded.last_error,
-         releasing_since=excluded.releasing_since`,
+         releasing_since=excluded.releasing_since,
+         machine_id=excluded.machine_id,
+         machine_fail_count=excluded.machine_fail_count,
+         escalation_stage=excluded.escalation_stage`,
     )
     .run(row);
 }
@@ -350,6 +414,9 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
   const diskGb = config.diskGb ?? DEFAULT_DISK_GB;
   const destroyRetries = config.destroyRetries ?? 3;
   const destroyBackoffMs = config.destroyBackoffMs ?? 1500;
+  const rebootFailThreshold = config.rebootFailThreshold ?? DEFAULT_REBOOT_FAIL_THRESHOLD;
+  const machineBlacklistTtlMs = config.machineBlacklistTtlMs ?? DEFAULT_MACHINE_BLACKLIST_TTL_MS;
+  const rebootWaitMs = config.rebootWaitMs ?? DEFAULT_REBOOT_WAIT_MS;
 
   // exec/fileOps: use the injected values if provided (tests), otherwise the
   // real docker.ts implementations. fileOps is only used by tests; production
@@ -362,6 +429,46 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
   };
 
   const timers: ReturnType<typeof setInterval>[] = [];
+
+  // ── Machine-health (blacklist) helpers ──────────────────────────────────────
+
+  /**
+   * Currently-blacklisted physical machine ids, with TTL applied at query time.
+   * A row counts as blacklisted iff blacklisted=1 AND blacklisted_at is within
+   * the TTL window. Expired rows are ignored (not deleted — fail_count stays for
+   * diagnostics) so a recovered host becomes re-eligible automatically. Passed to
+   * vast.searchOffers({ excludeMachineIds }) so a known-bad host is never picked.
+   */
+  function blacklistedMachineIds(): number[] {
+    const cutoff = now() - machineBlacklistTtlMs;
+    const rows = db()
+      .prepare(
+        "SELECT machine_id FROM gpu_machine_health WHERE blacklisted = 1 AND blacklisted_at IS NOT NULL AND blacklisted_at > ?",
+      )
+      .all(cutoff) as Array<{ machine_id: number }>;
+    return rows.map((r) => r.machine_id);
+  }
+
+  /**
+   * Mark a physical machine as blacklisted (avoid re-picking it). Idempotent:
+   * preserves cumulative fail_count across re-blacklistings. The blacklist expires
+   * after machineBlacklistTtlMs (query-time expiry — see blacklistedMachineIds).
+   */
+  function blacklistMachine(machineId: number, error: string): void {
+    const ts = now();
+    db()
+      .prepare(
+        `INSERT INTO gpu_machine_health (machine_id, fail_count, blacklisted, blacklisted_at, last_failed_at, last_error)
+         VALUES (?, 1, 1, ?, ?, ?)
+         ON CONFLICT(machine_id) DO UPDATE SET
+           fail_count = gpu_machine_health.fail_count + 1,
+           blacklisted = 1,
+           blacklisted_at = excluded.blacklisted_at,
+           last_failed_at = excluded.last_failed_at,
+           last_error = excluded.last_error`,
+      )
+      .run(machineId, ts, ts, error);
+  }
 
   // ── Provisioning ──────────────────────────────────────────────────────────
 
@@ -412,7 +519,10 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
     // The SSH public key is passed via --env GPU_SSH_PUBKEY so the onstart
     // script can inject it directly into authorized_keys. This is more reliable
     // than vast.ai's `attach ssh` API (which often silently fails).
-    const offers = await vast.searchOffers({ limit: 5 });
+    // excludeMachineIds avoids any physical host blacklisted by the escalation
+    // ladder (a flaky machine that failed init + reboot) so searchOffers never
+    // re-picks it within the blacklist TTL.
+    const offers = await vast.searchOffers({ limit: 5, excludeMachineIds: blacklistedMachineIds() });
     if (offers.length === 0) throw new Error("no qualifying GPU offers under cap");
     const offer = offers[0];
     const onstart = await readOnstartScript(exec, container, gpuImage);
@@ -437,99 +547,289 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
       },
     });
     const cur1 = getLease(lease.instance_id) ?? lease;
-    upsertLease({ ...cur1, state: "provisioning", vast_id: vastId, gpu_name: offer.gpu_name, dph: offer.dph_total, acquired_at: now() });
+    upsertLease({
+      ...cur1,
+      state: "provisioning",
+      vast_id: vastId,
+      gpu_name: offer.gpu_name,
+      dph: offer.dph_total,
+      acquired_at: now(),
+      // Record the physical host so the escalation ladder can detect "same
+      // flaky machine re-picked" and so we know which machine_id to blacklist.
+      machine_id: offer.machine_id ?? null,
+    });
 
     // Everything after createInstance must clean up the instance on failure.
     // Without this, a failed SCP or socket timeout orphans a billing instance.
+    // bringInstanceOnline runs the init steps (wait-for-running → SSH → SCP →
+    // socket → tunnel → ready); on failure, handleProvisionInitFailure runs the
+    // escalation ladder (reboot → blacklist → give up).
     try {
-      // ── 4. Wait for running + SSH readiness ───────────────────────────────
-      await vast.waitForRunning(vastId);
-      const target = await vast.sshUrl(vastId);
-      if (!target) throw new Error(`instance ${vastId} has no ssh url`);
-      const cur2 = getLease(lease.instance_id) ?? lease;
-      upsertLease({ ...cur2, state: "provisioning", vast_id: vastId, ssh_host: target.host, ssh_port: target.port });
-
-      // Wait for SSH to actually accept connections (not just cur_state=running).
-      // The CUDA image + onstart boot takes time; the onstart script injects the
-      // SSH key early, but sshd still needs to finish starting.
-      await waitForSsh(container, target);
-
-      // ── 5. SCP the addon.py onto the instance ──────────────────────────────
-      // All SSH/SCP runs INSIDE the container using the container's own key.
-      const scpBase = `ssh -i ${SSH_KEY_PATH} -p ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
-      const scpOpts = `-i ${SSH_KEY_PATH} -P ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
-
-      // SCP the addon.py onto the instance — only needed for the bare CUDA image
-      // (the pre-built image already has the addon baked in). Best-effort:
-      // onstart.sh has a GitHub fallback for the addon, so failure is non-fatal.
-      const isBakedImage = !gpuImage.includes("nvidia/cuda");
-      if (!isBakedImage) {
-        await exec(container, ["bash", "-lc", `${scpBase} root@${target.host} 'mkdir -p /app/gpu'`], { user: APP_USER }).catch(() => {});
-        await exec(
-          container,
-          ["bash", "-lc", `scp ${scpOpts} '${GPU_ADDON_CONTAINER_PATH}' 'root@${target.host}:/app/gpu/addon.py'`],
-          { user: APP_USER },
-        ).catch((e) => {
-          console.warn(`[lease-manager] scp addon.py failed (onstart will fall back to GitHub):`, (e as Error).message);
-        });
-      }
-
-      // Resume: push the saved .blend up so Blender opens at the last save.
-      if (resume) {
-        const blendPath = `/workspace/blends/${lease.instance_id}/scene.blend`;
-        const exists = await exec(container, ["test", "-f", blendPath], { user: APP_USER });
-        if (exists.code === 0) {
-          await exec(
-            container,
-            ["bash", "-lc", `${scpBase} root@${target.host} 'mkdir -p /root/blender' && scp ${scpOpts} '${blendPath}' 'root@${target.host}:/root/blender/scene.blend'`],
-            { user: APP_USER },
-          ).catch(() => {}); // best-effort
-        }
-
-        // Push brand assets selected for this lane to the GPU instance.
-        // The shared function handles size-checking (skips unchanged files).
-        await pushBrandAssetsImpl(lease.instance_id).catch(() => {});
-      }
-
-      // ── 6. Wait for the onstart script to bring up blender-mcp ──────────────
-      await waitForBlenderSocket(container, target);
-
-      // ── 7. Start the SSH tunnel INSIDE the container ────────────────────────
-      await startTunnel(container, target);
-
-      const cur3 = getLease(lease.instance_id) ?? lease;
-      upsertLease({ ...cur3, state: "ready", last_activity: now(), last_error: null });
-
-      // On a resume, the pushed scene.blend was saved by a prior session and
-      // carries its serialized blendermcp_use_polyhaven / blendermcp_use_sketchfab
-      // values. Blends saved before the startup-enable fix carry False, so the
-      // agent's polyhaven/sketchfab tools come back "disabled" until re-enabled.
-      // Re-assert both props on the resumed scene now that the socket is up,
-      // and re-save so the corrected values persist. Best-effort: wrapped to
-      // never block provisioning on a re-enable failure. (The Sketchfab API key
-      // is NOT set here — it's delivered as an env var at create-time, so it
-      // never lands in scene.blend.)
-      if (resume) {
-        await exec(
-          container,
-          [
-            "bash",
-            "-lc",
-            `echo '{"type":"execute_code","params":{"code":"import bpy; bpy.context.scene.blendermcp_use_polyhaven = True; bpy.context.scene.blendermcp_use_sketchfab = True; bpy.ops.wm.save_as_mainfile(filepath=\\\\\\"/root/blender/scene.blend\\\\\\")"}}' | timeout 10 nc -q1 127.0.0.1 ${BLENDER_PORT} 2>/dev/null || true`,
-          ],
-          { user: APP_USER },
-        ).catch(() => {});
-      }
+      await bringInstanceOnline(vastId, container, lease, resume);
+      // Init succeeded — reset the escalation ladder. A transient failure on a
+      // good machine must not poison the count for the next lease.
+      const okRow = getLease(lease.instance_id);
+      if (okRow) upsertLease({ ...okRow, escalation_stage: "fresh", machine_fail_count: 0 });
     } catch (e) {
-      // Provisioning failed after the instance was created — destroy it so it
-      // doesn't keep billing as an orphan. The caller will move the lease to
-      // "queued" for retry.
-      console.error(`[lease-manager] provision failed for ${lease.instance_id}, destroying instance ${vastId}:`, (e as Error).message);
+      await handleProvisionInitFailure(vastId, container, lease, resume, e);
+    }
+  }
+
+  /**
+   * Run the post-createInstance init steps: wait for running, resolve the SSH
+   * endpoint, wait for sshd, SCP the addon (+ resume .blend + brand assets),
+   * wait for the blender-mcp socket, start the tunnel, and flip to 'ready'.
+   *
+   * Extracted from provisionInstance so the escalation ladder can re-run the
+   * SAME init sequence after a reboot (rebootInstance → bringInstanceOnline)
+   * without duplicating the ~40 lines of init logic. Throws on any init failure
+   * — the caller (provisionInstance or handleProvisionInitFailure) decides
+   * whether to destroy/reboot/escalate.
+   */
+  async function bringInstanceOnline(
+    vastId: number,
+    container: ContainerRow,
+    lease: LeaseRow,
+    resume: boolean,
+  ): Promise<void> {
+    // ── 4. Wait for running + SSH readiness ───────────────────────────────
+    await vast.waitForRunning(vastId);
+    const target = await vast.sshUrl(vastId);
+    if (!target) throw new Error(`instance ${vastId} has no ssh url`);
+    const cur2 = getLease(lease.instance_id) ?? lease;
+    upsertLease({ ...cur2, state: "provisioning", vast_id: vastId, ssh_host: target.host, ssh_port: target.port });
+
+    // Wait for SSH to actually accept connections (not just cur_state=running).
+    // The CUDA image + onstart boot takes time; the onstart script injects the
+    // SSH key early, but sshd still needs to finish starting.
+    await waitForSsh(container, target);
+
+    // ── 5. SCP the addon.py onto the instance ──────────────────────────────
+    // All SSH/SCP runs INSIDE the container using the container's own key.
+    const scpBase = `ssh -i ${SSH_KEY_PATH} -p ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
+    const scpOpts = `-i ${SSH_KEY_PATH} -P ${target.port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10`;
+
+    // SCP the addon.py onto the instance — only needed for the bare CUDA image
+    // (the pre-built image already has the addon baked in). Best-effort:
+    // onstart.sh has a GitHub fallback for the addon, so failure is non-fatal.
+    const isBakedImage = !gpuImage.includes("nvidia/cuda");
+    if (!isBakedImage) {
+      await exec(container, ["bash", "-lc", `${scpBase} root@${target.host} 'mkdir -p /app/gpu'`], { user: APP_USER }).catch(() => {});
+      await exec(
+        container,
+        ["bash", "-lc", `scp ${scpOpts} '${GPU_ADDON_CONTAINER_PATH}' 'root@${target.host}:/app/gpu/addon.py'`],
+        { user: APP_USER },
+      ).catch((e) => {
+        console.warn(`[lease-manager] scp addon.py failed (onstart will fall back to GitHub):`, (e as Error).message);
+      });
+    }
+
+    // Resume: push the saved .blend up so Blender opens at the last save.
+    if (resume) {
+      const blendPath = `/workspace/blends/${lease.instance_id}/scene.blend`;
+      const exists = await exec(container, ["test", "-f", blendPath], { user: APP_USER });
+      if (exists.code === 0) {
+        await exec(
+          container,
+          ["bash", "-lc", `${scpBase} root@${target.host} 'mkdir -p /root/blender' && scp ${scpOpts} '${blendPath}' 'root@${target.host}:/root/blender/scene.blend'`],
+          { user: APP_USER },
+        ).catch(() => {}); // best-effort
+      }
+
+      // Push brand assets selected for this lane to the GPU instance.
+      // The shared function handles size-checking (skips unchanged files).
+      await pushBrandAssetsImpl(lease.instance_id).catch(() => {});
+    }
+
+    // ── 6. Wait for the onstart script to bring up blender-mcp ──────────────
+    await waitForBlenderSocket(container, target);
+
+    // ── 7. Start the SSH tunnel INSIDE the container ────────────────────────
+    await startTunnel(container, target);
+
+    const cur3 = getLease(lease.instance_id) ?? lease;
+    upsertLease({ ...cur3, state: "ready", last_activity: now(), last_error: null });
+
+    // On a resume, the pushed scene.blend was saved by a prior session and
+    // carries its serialized blendermcp_use_polyhaven / blendermcp_use_sketchfab
+    // values. Blends saved before the startup-enable fix carry False, so the
+    // agent's polyhaven/sketchfab tools come back "disabled" until re-enabled.
+    // Re-assert both props on the resumed scene now that the socket is up,
+    // and re-save so the corrected values persist. Best-effort: wrapped to
+    // never block provisioning on a re-enable failure. (The Sketchfab API key
+    // is NOT set here — it's delivered as an env var at create-time, so it
+    // never lands in scene.blend.)
+    if (resume) {
+      await exec(
+        container,
+        [
+          "bash",
+          "-lc",
+          `echo '{"type":"execute_code","params":{"code":"import bpy; bpy.context.scene.blendermcp_use_polyhaven = True; bpy.context.scene.blendermcp_use_sketchfab = True; bpy.ops.wm.save_as_mainfile(filepath=\\\\\\"/root/blender/scene.blend\\\\\\")"}}' | timeout 10 nc -q1 127.0.0.1 ${BLENDER_PORT} 2>/dev/null || true`,
+        ],
+        { user: APP_USER },
+      ).catch(() => {});
+    }
+  }
+
+  /**
+   * Init-failure escalation ladder. Called when bringInstanceOnline throws.
+   * Decides what to do based on the lease's escalation_stage + machine_fail_count:
+   *
+   *   fresh + below threshold      → destroy + re-queue (increment count). Throws.
+   *   fresh + at threshold         → rebootInstance + bringInstanceOnline. If that
+   *                                  succeeds, returns normally (provision OK). If
+   *                                  it fails, blacklist the machine + re-queue
+   *                                  with stage=post_blacklist. Throws.
+   *   post_blacklist (diff machine → destroy + terminal gave_up. Throws.
+   *     also failed)
+   *
+   * The throw propagates to the caller (acquireImpl / queuePumpTick / etc.),
+   * which re-queues — UNLESS the stage is 'gave_up', in which case the caller's
+   * handleProvisionFailure transition catches it and finalizes to destroyed +
+   * manually_released=1 instead of re-queuing.
+   *
+   * Returns normally ONLY when a reboot recovered the instance (the lease is
+   * already 'ready' in that case).
+   */
+  async function handleProvisionInitFailure(
+    vastId: number,
+    container: ContainerRow,
+    lease: LeaseRow,
+    resume: boolean,
+    error: unknown,
+  ): Promise<void> {
+    const msg = (error as Error).message;
+    const live = getLease(lease.instance_id) ?? lease;
+    const stage: EscalationStage = live.escalation_stage ?? "fresh";
+    const failMachineId = live.machine_id ?? null;
+    const failCount = (live.machine_fail_count ?? 0) + 1; // counting THIS failure
+
+    // post_blacklist: the one different-machine attempt also failed → give up.
+    // Don't blacklist this second machine (one strike is enough to surface to
+    // the user; two consecutive bad hosts suggests a systemic issue the user
+    // should see). Move to gave_up; the caller finalizes to destroyed.
+    if (stage === "post_blacklist") {
+      console.error(
+        `[lease-manager] ${lease.instance_id}: init failed on post-blacklist machine ${failMachineId} (gave up): ${msg}`,
+      );
       await vast.destroyInstance(vastId).catch((err) =>
         console.error(`[lease-manager] cleanup-destroy failed for orphan ${vastId}:`, (err as Error).message),
       );
-      throw e;
+      upsertLease({
+        ...live,
+        escalation_stage: "gave_up",
+        machine_fail_count: failCount,
+        last_error: `GPU init failed after reboot + machine change. Click Acquire GPU to retry. (${msg})`,
+      });
+      throw error; // caller's handleProvisionFailure sees gave_up → terminal
     }
+
+    // fresh + threshold reached on the same machine → reboot before blacklist.
+    if (stage === "fresh" && failCount >= rebootFailThreshold && failMachineId != null) {
+      console.log(
+        `[lease-manager] ${lease.instance_id}: ${failCount} init failures on machine ${failMachineId}, rebooting instance ${vastId} before blacklist`,
+      );
+      upsertLease({ ...live, escalation_stage: "rebooting", machine_fail_count: failCount, last_error: msg });
+      // rebootInstance = docker stop+start (data preserved). If the reboot
+      // itself throws (instance gone, error state), fall through to blacklist.
+      const rebooted = await vast
+        .rebootInstance(vastId)
+        .then(() => true)
+        .catch((err) => {
+          console.warn(`[lease-manager] ${lease.instance_id}: reboot of ${vastId} failed, blacklisting machine ${failMachineId}:`, (err as Error).message);
+          return false;
+        });
+      if (rebooted) {
+        // Re-run the full init sequence on the rebooted instance. waitForRunning
+        // inside bringInstanceOnline waits for the reboot to complete.
+        try {
+          await bringInstanceOnline(vastId, container, lease, resume);
+          // Reboot recovered — reset the ladder.
+          const after = getLease(lease.instance_id);
+          if (after) upsertLease({ ...after, escalation_stage: "fresh", machine_fail_count: 0, last_error: null });
+          console.log(`[lease-manager] ${lease.instance_id}: recovered via reboot of machine ${failMachineId}`);
+          return; // provision succeeded via the reboot path
+        } catch (retryErr) {
+          console.warn(
+            `[lease-manager] ${lease.instance_id}: init failed again after reboot of machine ${failMachineId}, blacklisting:`,
+            (retryErr as Error).message,
+          );
+        }
+      }
+      // Reboot failed or post-reboot init failed → blacklist + try a different machine.
+      blacklistMachine(failMachineId, `init failed after reboot attempt: ${msg}`);
+      await vast.destroyInstance(vastId).catch((err) =>
+        console.error(`[lease-manager] cleanup-destroy failed for orphan ${vastId}:`, (err as Error).message),
+      );
+      const afterReboot = getLease(lease.instance_id) ?? live;
+      upsertLease({
+        ...afterReboot,
+        escalation_stage: "post_blacklist",
+        machine_id: null,
+        machine_fail_count: 0,
+        last_error: `Blacklisted flaky machine ${failMachineId}; acquiring a different GPU.`,
+      });
+      throw error; // caller re-queues; next searchOffers excludes the blacklisted machine
+    }
+
+    // fresh + below threshold → normal destroy + re-queue. Increment the count
+    // so the next failure on the same machine reaches the reboot threshold.
+    console.error(`[lease-manager] provision failed for ${lease.instance_id}, destroying instance ${vastId} (machine ${failMachineId}, fail ${failCount}/${rebootFailThreshold}): ${msg}`);
+    await vast.destroyInstance(vastId).catch((err) =>
+      console.error(`[lease-manager] cleanup-destroy failed for orphan ${vastId}:`, (err as Error).message),
+    );
+    upsertLease({ ...live, machine_fail_count: failCount, last_error: msg });
+    throw error;
+  }
+
+  /**
+   * Caller-side handler for a provisionInstance throw. Centralizes the
+   * "gave_up → terminal, else re-queue" decision so all four re-queue catch
+   * sites (acquireImpl fresh/re-acquire, queuePumpTick, retryQueuedImpl,
+   * reProvision) stay consistent.
+   *
+   * If the live row's escalation_stage is 'gave_up', finalize to destroyed +
+   * manually_released=1 (reusing the explicit-release terminal state so the
+   * existing "Acquire GPU" button path + frontend lane-open suppression both
+   * work unchanged). Otherwise re-queue for retry exactly as before.
+   *
+   * NOTE: handleProvisionInitFailure (inside provisionInstance) already wrote
+   * the gave_up stage + last_error + destroyed the instance. This fn only flips
+   * the lease row to the terminal state the UI expects.
+   */
+  async function handleProvisionFailure(
+    instanceId: string,
+    fallbackRow: LeaseRow,
+    error: unknown,
+    logTag: string,
+  ): Promise<void> {
+    const msg = (error as Error).message;
+    const cur = getLease(instanceId) ?? fallbackRow;
+    if (cur.escalation_stage === "gave_up") {
+      console.error(`[${logTag}] ${instanceId}: giving up after escalation (gave_up): ${msg}`);
+      upsertLease({
+        ...cur,
+        state: "destroyed",
+        vast_id: null,
+        ssh_host: null,
+        ssh_port: null,
+        queue_position: null,
+      });
+      setManuallyReleased(instanceId, 1);
+      return;
+    }
+    // Normal re-queue. The lease stays non-terminal so the queue pump / retry
+    // path retries (and the escalation ladder advances on the next attempt).
+    console.error(`[${logTag}] provision failed for ${instanceId}, re-queuing: ${msg}`);
+    upsertLease({
+      ...cur,
+      state: "queued",
+      vast_id: null,
+      queue_requested_at: now(),
+      queue_position: queuedLeases().length,
+      last_error: msg,
+    });
   }
 
   /** Wait until SSH on the instance accepts connections (sshd ready). */
@@ -852,6 +1152,9 @@ __STATE_EOF__`;
         last_error: null,
         manually_released: 0,
         releasing_since: null,
+        machine_id: null,
+        machine_fail_count: 0,
+        escalation_stage: "fresh",
       };
       // Atomically reserve a slot (or queue if at capacity) before provisioning.
       if (!claimConcurrencySlot(reset, maxConcurrent)) {
@@ -862,17 +1165,7 @@ __STATE_EOF__`;
       try {
         await provisionInstance(getLease(opts.instanceId) ?? reset, opts.container, true);
       } catch (e) {
-        const msg = (e as Error).message;
-        console.error(`[lease-manager] re-acquire provision failed for ${opts.instanceId}:`, msg);
-        const cur = getLease(opts.instanceId) ?? reset;
-        upsertLease({
-          ...cur,
-          state: "queued",
-          vast_id: null,
-          queue_requested_at: now(),
-          queue_position: queuedLeases().length,
-          last_error: msg,
-        });
+        await handleProvisionFailure(opts.instanceId, reset, e, "lease-manager");
       }
       return getLease(opts.instanceId)!;
     }
@@ -901,6 +1194,9 @@ __STATE_EOF__`;
       last_error: null,
       manually_released: 0,
       releasing_since: null,
+      machine_id: null,
+      machine_fail_count: 0,
+      escalation_stage: "fresh",
     };
 
     if (!claimConcurrencySlot(base, maxConcurrent)) {
@@ -918,18 +1214,9 @@ __STATE_EOF__`;
       await provisionInstance(getLease(opts.instanceId) ?? base, opts.container, opts.resume);
     } catch (e) {
       // Provisioning failed — store the error so the UI can show WHY, then move
-      // to queued so the queue pump can retry when conditions improve.
-      const msg = (e as Error).message;
-      console.error(`[lease-manager] provision failed for ${opts.instanceId}:`, msg);
-      const cur = getLease(opts.instanceId) ?? base;
-      upsertLease({
-        ...cur,
-        state: "queued",
-        vast_id: null,
-        queue_requested_at: now(),
-        queue_position: queuedLeases().length,
-        last_error: msg,
-      });
+      // to queued so the queue pump can retry when conditions improve (unless the
+      // escalation ladder reached gave_up, in which case finalize to terminal).
+      await handleProvisionFailure(opts.instanceId, base, e, "lease-manager");
     }
     return getLease(opts.instanceId)!;
   }
@@ -1409,9 +1696,7 @@ __STATE_EOF__`;
     try {
       await provisionInstance({ ...lease, state: "provisioning" }, container, true /* resume */);
     } catch (e) {
-      const msg = (e as Error).message;
-      console.error(`[watchdog] ${lease.instance_id}: re-provision failed:`, msg);
-      upsertLease({ ...lease, state: "queued", queue_requested_at: now(), last_error: msg });
+      await handleProvisionFailure(lease.instance_id, lease, e, "watchdog");
     }
   }
 
@@ -1478,7 +1763,7 @@ __STATE_EOF__`;
    */
   async function probeQueueOffers(): Promise<{ ok: true; offers: Offer[] } | { ok: false; error: string }> {
     try {
-      const offers = await vast.searchOffers({ limit: 1 });
+      const offers = await vast.searchOffers({ limit: 1, excludeMachineIds: blacklistedMachineIds() });
       return { ok: true, offers };
     } catch (e) {
       return { ok: false, error: (e as Error).message };
@@ -1577,12 +1862,9 @@ __STATE_EOF__`;
       maxConcurrent,
     );
     if (!promoted) return;
-    await withLock(next.instance_id, () => provisionInstance(getLease(next.instance_id)!, container, true)).catch((e) => {
-      const msg = (e as Error).message;
-      console.error(`[queue-pump] provision failed for ${next.instance_id}:`, msg);
-      const cur = getLease(next.instance_id) ?? next;
-      upsertLease({ ...cur, state: "queued", vast_id: null, queue_requested_at: now(), last_error: msg });
-    });
+    await withLock(next.instance_id, () => provisionInstance(getLease(next.instance_id)!, container, true)).catch((e) =>
+      handleProvisionFailure(next.instance_id, next, e, "queue-pump"),
+    );
     // Re-index remaining queue positions.
     reindexQueue();
   }
@@ -1624,10 +1906,7 @@ __STATE_EOF__`;
     try {
       await provisionInstance(getLease(instanceId) ?? stamped, container, true);
     } catch (e) {
-      const msg = (e as Error).message;
-      console.error(`[retry-queued] provision failed for ${instanceId}:`, msg);
-      const cur = getLease(instanceId) ?? stamped;
-      upsertLease({ ...cur, state: "queued", vast_id: null, queue_requested_at: now(), last_error: msg });
+      await handleProvisionFailure(instanceId, stamped, e, "retry-queued");
     }
     reindexQueue();
   }

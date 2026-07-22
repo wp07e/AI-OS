@@ -10,6 +10,14 @@
 export interface Offer {
   /** Offer id (single-use: can create exactly one instance from it). */
   id: number;
+  /**
+   * Physical host machine id. Multiple offers (different GPU partitions,
+   * interruptible/on-demand variants) can share the same machine_id — they all
+   * live on the same physical box. Used by the lease manager to detect "the same
+   * flaky machine keeps being re-picked" and to blacklist a known-bad host after
+   * a reboot fails (see lib/gpu/lease-manager.ts escalation ladder).
+   */
+  machine_id?: number;
   /** Display form, e.g. "RTX 4060 Ti". */
   gpu_name: string;
   /** Number of GPUs bundled in this offer. */
@@ -100,6 +108,14 @@ export interface SearchOffersOptions {
   geolocations?: readonly string[];
   /** Sort field + direction, e.g. "dlperf_per_dphtotal-". */
   orderBy?: string;
+  /**
+   * Physical machine ids to EXCLUDE from results (the defensive re-filter drops
+   * any offer whose machine_id is in this set). Used to avoid re-picking a
+   * known-bad host that was blacklisted after a failed reboot. The exclusion is
+   * enforced in code (not in the vast query DSL) because vastai's query syntax
+   * has no "not in" operator for machine_id.
+   */
+  excludeMachineIds?: number[];
   /** Max number of offers to return. */
   limit?: number;
   /** Pricing type: on-demand (default) or interruptible. vastai CLI accepts

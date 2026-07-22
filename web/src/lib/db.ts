@@ -31,6 +31,8 @@ function openDb(): Database.Database {
   migrateGpuLeasesManuallyReleased(conn);
   migrateGpuLeasesQueueDiagnostics(conn);
   migrateGpuLeasesReleasingSince(conn);
+  migrateGpuLeasesRecoveryColumns(conn);
+  migrateGpuMachineHealth(conn);
   seedDefaultUser(conn);
   _db = conn;
   return conn;
@@ -157,7 +159,25 @@ function migrate(conn: Database.Database) {
       last_error     TEXT,            -- last provisioning/recovery error (surfaced to UI)
       manually_released INTEGER NOT NULL DEFAULT 0, -- 1 when the user explicitly released the GPU; suppresses auto-reacquire (watchdog reProvision + frontend lane-open effect) until an explicit Acquire clears it
       releasing_since INTEGER,          -- ms epoch when state entered 'releasing'; watchdog reaper force-completes a release older than RELEASE_DEADLINE_MS regardless of poller activity
+      machine_id      INTEGER,          -- vast.ai physical host id of the current/pending instance; detects "same flaky machine re-picked" across destroy/re-create
+      machine_fail_count INTEGER NOT NULL DEFAULT 0, -- consecutive init failures on the SAME machine_id (reset to 0 on success or when a different machine is picked)
+      escalation_stage TEXT NOT NULL DEFAULT 'fresh', -- init-failure escalation: fresh | rebooting | post_blacklist | gave_up (see lease-manager escalation ladder)
       FOREIGN KEY(instance_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
+    );
+
+    -- Physical-host health ledger. When a machine_id fails init AND a reboot
+    -- fails to recover it, the host is blacklisted here for a TTL so it is never
+    -- re-picked by searchOffers (see vast.ts excludeMachineIds). Survives lane
+    -- destruction and process restarts, so a flaky host won't be re-acquired in
+    -- a fresh lane. Query-time expiry: a row is treated as blacklisted iff
+    -- blacklisted=1 AND blacklisted_at > now() - GPU_MACHINE_BLACKLIST_TTL_MS.
+    CREATE TABLE IF NOT EXISTS gpu_machine_health (
+      machine_id     INTEGER PRIMARY KEY,
+      fail_count     INTEGER NOT NULL DEFAULT 0,  -- cumulative init failures ever observed (diagnostics)
+      blacklisted    INTEGER NOT NULL DEFAULT 0,  -- 1 when the host is currently being avoided
+      blacklisted_at INTEGER,                     -- ms epoch when blacklisted; null when not blacklisted
+      last_failed_at INTEGER,                     -- ms epoch of the most recent init failure
+      last_error     TEXT                         -- last failure message that led to blacklisting
     );
   `);
 }
@@ -226,6 +246,52 @@ export function migrateGpuLeasesReleasingSince(conn: Database.Database): void {
   if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
   if (!cols.some((c) => c.name === "releasing_since")) {
     conn.exec("ALTER TABLE gpu_leases ADD COLUMN releasing_since INTEGER");
+  }
+}
+
+/**
+ * Add machine-init-failure escalation columns to pre-existing gpu_leases tables.
+ *
+ * `machine_id` records the physical host of the current/pending instance so the
+ * lease manager can detect "the same flaky machine keeps being re-picked" across
+ * destroy/re-create cycles. `machine_fail_count` tracks consecutive init
+ * failures on that same machine. `escalation_stage` drives the escalation ladder
+ * (fresh → rebooting → post_blacklist → gave_up) described in lease-manager.ts.
+ * All reset to defaults on a successful provision or an explicit re-acquire.
+ */
+export function migrateGpuLeasesRecoveryColumns(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(gpu_leases)").all() as Array<{ name: string }>;
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  if (!cols.some((c) => c.name === "machine_id")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN machine_id INTEGER");
+  }
+  if (!cols.some((c) => c.name === "machine_fail_count")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN machine_fail_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!cols.some((c) => c.name === "escalation_stage")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN escalation_stage TEXT NOT NULL DEFAULT 'fresh'");
+  }
+}
+
+/**
+ * Ensure the gpu_machine_health table exists on pre-existing databases.
+ *
+ * On a clean-slate DB the CREATE TABLE in initSchema() already creates it; this
+ * migration covers databases created before the table existed. Idempotent.
+ */
+export function migrateGpuMachineHealth(conn: Database.Database): void {
+  const tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='gpu_machine_health'").all();
+  if (tables.length === 0) {
+    conn.exec(`
+      CREATE TABLE gpu_machine_health (
+        machine_id     INTEGER PRIMARY KEY,
+        fail_count     INTEGER NOT NULL DEFAULT 0,
+        blacklisted    INTEGER NOT NULL DEFAULT 0,
+        blacklisted_at INTEGER,
+        last_failed_at INTEGER,
+        last_error     TEXT
+      );
+    `);
   }
 }
 
