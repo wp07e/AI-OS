@@ -142,11 +142,13 @@ describe("LeasePill", () => {
       state: "ready",
       gpu_name: "RTX 4060",
       dph: 0.067,
+      inet_cost: 0.05,
     };
     render(<LeasePill lease={lease} loaded onRelease={vi.fn()} onAcquire={vi.fn()} />);
     expect(screen.getByText("GPU Ready")).toBeDefined();
     expect(screen.getByText(/RTX 4060/)).toBeDefined();
     expect(screen.getByText(/\$0\.067\/hr/)).toBeDefined();
+    expect(screen.getByText(/\+\$0\.050\/GB/)).toBeDefined();
     expect(screen.getByText("Release GPU")).toBeDefined();
   });
 

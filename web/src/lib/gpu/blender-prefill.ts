@@ -83,7 +83,10 @@ export async function buildBlenderLeasePrefill(
 
   if (lease.state === "ready" && lease.gpu_name) {
     lines.push(`GPU: ${lease.gpu_name}`);
-    if (lease.dph) lines.push(`Cost: $${lease.dph.toFixed(3)}/hr`);
+    if (lease.dph) {
+      const inet = lease.inet_cost ? ` + $${lease.inet_cost.toFixed(3)}/GB internet` : "";
+      lines.push(`Cost: $${lease.dph.toFixed(3)}/hr${inet}`);
+    }
     lines.push(``);
     lines.push(
       `You are connected to a remote Blender instance via the blender MCP tools. Use them directly for scene work (create_object, execute_code, get_render, Poly Haven assets, etc.).`,

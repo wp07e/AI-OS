@@ -35,6 +35,10 @@ export interface Offer {
   reliability2?: number;
   /** Download Mbps. */
   inet_down?: number;
+  /** Download bandwidth cost in $/GB (usage-based Vast.ai Internet fee). */
+  inet_down_cost?: number;
+  /** Upload bandwidth cost in $/GB (usage-based Vast.ai Internet fee). */
+  inet_up_cost?: number;
   /** GPU RAM in MB. */
   gpu_ram?: number;
   /** Host available disk in MB. */

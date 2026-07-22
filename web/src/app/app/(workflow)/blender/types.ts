@@ -29,6 +29,9 @@ export interface LeaseInfo {
   state: LeaseState;
   gpu_name?: string | null;
   dph?: number | null;
+  /** Combined inet_down+up cost in $/GB (usage-based Vast.ai Internet fee).
+   *  Surfaced alongside dph so the pill shows both rate types. */
+  inet_cost?: number | null;
   ssh_host?: string | null;
   ssh_port?: number | null;
   queue_position?: number | null;

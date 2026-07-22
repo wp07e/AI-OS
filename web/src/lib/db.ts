@@ -32,6 +32,7 @@ function openDb(): Database.Database {
   migrateGpuLeasesQueueDiagnostics(conn);
   migrateGpuLeasesReleasingSince(conn);
   migrateGpuLeasesRecoveryColumns(conn);
+  migrateGpuLeasesInetCost(conn);
   migrateGpuMachineHealth(conn);
   seedDefaultUser(conn);
   _db = conn;
@@ -146,6 +147,7 @@ function migrate(conn: Database.Database) {
       vast_id       INTEGER,          -- vast.ai instance id (null while queued)
       gpu_name      TEXT,             -- e.g. "RTX 4060"
       dph           REAL,             -- dollars per hour
+      inet_cost     REAL,             -- combined inet_down+up cost in $/GB (usage-based, per Vast.ai)
       ssh_host      TEXT,
       ssh_port      INTEGER,
       ssh_key_id    INTEGER,          -- vast.ai SSH key id (cleaned up on release)
@@ -270,6 +272,23 @@ export function migrateGpuLeasesRecoveryColumns(conn: Database.Database): void {
   }
   if (!cols.some((c) => c.name === "escalation_stage")) {
     conn.exec("ALTER TABLE gpu_leases ADD COLUMN escalation_stage TEXT NOT NULL DEFAULT 'fresh'");
+  }
+}
+
+/**
+ * Add the inet_cost column to pre-existing gpu_leases tables (idempotent).
+ *
+ * Vast.ai charges usage-based Internet fees on top of the per-hour GPU rate
+ * (inet_down_cost + inet_up_cost, both $/GB). `inet_cost` stores the combined
+ * $/GB rate captured from the offer at acquire time, so the cost label can show
+ * both rate types honestly (dph is time-based; inet_cost is usage-based). NULL
+ * while queued / after release — same lifecycle as `dph`.
+ */
+export function migrateGpuLeasesInetCost(conn: Database.Database): void {
+  const cols = conn.prepare("PRAGMA table_info(gpu_leases)").all() as Array<{ name: string }>;
+  if (cols.length === 0) return; // table doesn't exist yet — CREATE handles it
+  if (!cols.some((c) => c.name === "inet_cost")) {
+    conn.exec("ALTER TABLE gpu_leases ADD COLUMN inet_cost REAL");
   }
 }
 

@@ -92,6 +92,10 @@ export interface LeaseRow {
   vast_id: number | null;
   gpu_name: string | null;
   dph: number | null;
+  /** Combined inet_down_cost + inet_up_cost in $/GB (usage-based Internet fee
+   *  from Vast.ai). Captured from the offer at acquire time; nulled on release.
+   *  Surfaced alongside dph so the cost label shows both rate types. */
+  inet_cost: number | null;
   ssh_host: string | null;
   ssh_port: number | null;
   /** The vast.ai SSH key id registered for this lease (cleaned up on release). */
@@ -149,6 +153,18 @@ export interface LeaseRow {
 }
 
 const now = () => Date.now();
+
+/**
+ * Combined per-GB Internet cost (download + upload) for a Vast.ai offer, or null
+ * when the host reports no inet cost. Rounded to 5 decimals to avoid float noise.
+ * Vast.ai exposes inet_down_cost / inet_up_cost as $/GB (usage-based) on offers.
+ */
+function roundInetCost(offer: Offer): number | null {
+  const down = typeof offer.inet_down_cost === "number" ? offer.inet_down_cost : 0;
+  const up = typeof offer.inet_up_cost === "number" ? offer.inet_up_cost : 0;
+  const total = down + up;
+  return total > 0 ? Math.round(total * 1e5) / 1e5 : null;
+}
 
 // ── Injected container-exec contract (matches docker.ts execInContainer) ────
 
@@ -267,17 +283,17 @@ function upsertLease(row: LeaseRow): void {
   db()
     .prepare(
       `INSERT INTO gpu_leases
-         (instance_id, user_id, state, vast_id, gpu_name, dph, ssh_host, ssh_port, ssh_key_id,
+         (instance_id, user_id, state, vast_id, gpu_name, dph, inet_cost, ssh_host, ssh_port, ssh_key_id,
           queue_position, queue_requested_at, queue_last_checked_at, queue_search_error,
           acquired_at, last_activity, last_synced_at, last_error,
           manually_released, releasing_since, machine_id, machine_fail_count, escalation_stage)
-       VALUES (@instance_id, @user_id, @state, @vast_id, @gpu_name, @dph, @ssh_host, @ssh_port, @ssh_key_id,
+       VALUES (@instance_id, @user_id, @state, @vast_id, @gpu_name, @dph, @inet_cost, @ssh_host, @ssh_port, @ssh_key_id,
           @queue_position, @queue_requested_at, @queue_last_checked_at, @queue_search_error,
           @acquired_at, @last_activity, @last_synced_at, @last_error,
           @manually_released, @releasing_since, @machine_id, @machine_fail_count, @escalation_stage)
        ON CONFLICT(instance_id) DO UPDATE SET
          state=excluded.state, vast_id=excluded.vast_id, gpu_name=excluded.gpu_name,
-         dph=excluded.dph, ssh_host=excluded.ssh_host, ssh_port=excluded.ssh_port,
+         dph=excluded.dph, inet_cost=excluded.inet_cost, ssh_host=excluded.ssh_host, ssh_port=excluded.ssh_port,
          ssh_key_id=excluded.ssh_key_id,
          queue_position=excluded.queue_position, acquired_at=excluded.acquired_at,
          queue_last_checked_at=excluded.queue_last_checked_at,
@@ -553,6 +569,11 @@ export function createLeaseManager(config: LeaseManagerConfig = {}): LeaseManage
       vast_id: vastId,
       gpu_name: offer.gpu_name,
       dph: offer.dph_total,
+      // Vast.ai also charges usage-based Internet fees (inet_down_cost +
+      // inet_up_cost, both $/GB). Capture the combined $/GB rate from the offer
+      // so the cost label can show both rate types (time-based dph + usage-based
+      // inet) instead of implying dph is the whole story.
+      inet_cost: roundInetCost(offer),
       acquired_at: now(),
       // Record the physical host so the escalation ladder can detect "same
       // flaky machine re-picked" and so we know which machine_id to blacklist.
@@ -1141,6 +1162,7 @@ __STATE_EOF__`;
         vast_id: null,
         gpu_name: null,
         dph: null,
+        inet_cost: null,
         ssh_host: null,
         ssh_port: null,
         ssh_key_id: null,
@@ -1181,6 +1203,7 @@ __STATE_EOF__`;
       vast_id: null,
       gpu_name: null,
       dph: null,
+      inet_cost: null,
       ssh_host: null,
       ssh_port: null,
       ssh_key_id: null,

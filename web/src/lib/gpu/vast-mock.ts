@@ -121,6 +121,10 @@ export function createMockVastClient(): VastClient {
           gpu_name: "RTX 4060 Ti",
           num_gpus: 1,
           dph_total: 0.081,
+          // Usage-based Internet fees ($/GB), mirrored from real Vast.ai offers
+          // so the inet_cost column + label path are exercised under the mock.
+          inet_down_cost: 0.02,
+          inet_up_cost: 0.03,
           dlperf: 50,
           dlperf_per_dphtotal: 617,
           cuda_max_good: 12.6,

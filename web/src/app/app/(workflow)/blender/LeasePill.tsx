@@ -228,7 +228,14 @@ function describeLease(lease: LeaseInfo | null): {
       return {
         label: "GPU Ready",
         color: "bg-emerald-400",
-        detail: [lease.gpu_name, lease.dph ? `$${lease.dph.toFixed(3)}/hr` : null]
+        // dph is the time-based GPU+host rate; inet_cost is the usage-based
+        // Internet rate ($/GB) Vast.ai also charges. Show both so the cost label
+        // doesn't imply dph is the whole story. "+" marks the usage-based term.
+        detail: [
+          lease.gpu_name,
+          lease.dph ? `$${lease.dph.toFixed(3)}/hr` : null,
+          lease.inet_cost ? `+$${lease.inet_cost.toFixed(3)}/GB` : null,
+        ]
           .filter(Boolean)
           .join(" • "),
       };
