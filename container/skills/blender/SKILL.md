@@ -218,39 +218,23 @@ for a quick framing check, then do a preview render to confirm definitively.
   a tight close-up of a specific part and its children.
 - Omit both for the default: all visible meshes framed at 1.0x.
 
-**4. Connected vs separate geometry — match the subject's structure.**
+**4. Curve creation footguns.**
 
-The right approach depends on what you're building. Read the matching technique
-skill (Step 0) for authoritative guidance. General principles by subject type:
-
-- **Single continuous forms** (a moon, a boulder, a slime creature, a vase):
-  build as a **single mesh**. Separate primitives always look disjointed where
-  the surface should flow continuously.
-- **Multi-part assemblies with rigid components** (a house with walls/roof/
-  doors, machinery, vehicles, furniture, armored characters): **separate
-  meshes** + the assembly protocol above are correct — the gaps between parts
-  are intentional and realistic.
-- **Segmented organic subjects** (insects, arthropods): follow the anatomy
-  table in the matching technique skill — separate segments that overlap at
-  the joints is typically correct for exoskeleton creatures.
-- **Organic appendages or curves** (cables, pipes, tentacles, vines, ropes):
-  prefer **Bezier curves with a circular bevel** over raw cylinders. Curves
-  give smooth bends with fewer vertices. **Always pass `location=(x,y,z)` when
-  creating curves** — without it the curve object's origin stays at (0,0,0)
-  even if the bezier points are positioned correctly, so the part appears at
-  the wrong world position after `convert(target='MESH')`. **Note:** curves
-  render as thin wireframe lines in viewport screenshots until converted to
-  mesh — call `bpy.ops.object.convert(target='MESH')` before taking a viewport
-  grab so you can verify the actual form.
+When creating Bezier curves (for cables, pipes, appendages, or any path-based
+geometry):
+- **Always pass `location=(x,y,z)`** when calling
+  `bpy.ops.curve.primitive_bezier_curve_add()`. Without it the curve object's
+  origin stays at (0,0,0) even if the bezier control points are positioned
+  correctly in local space — the part appears at the wrong world position
+  after `convert(target='MESH')`.
+- **Convert curves to mesh** (`bpy.ops.object.convert(target='MESH')`) before
+  taking a viewport screenshot — curves render as thin wireframe lines in the
+  viewport until converted, so you can't verify the actual form.
 
 **5. Subdivision Surface — levels and support loops.**
 
-When using Subdivision Surface on a body form:
-- Use viewport level 2 / render level 3.
-- Add **support edge loops** (loop cut, Ctrl+R) at segment boundaries so the
-  form holds its silhouette under subdivision.
-- Bare subdivision on separate primitives still looks like separate primitives
-  — subdivide a *connected* mesh for the organic-form benefit to register.
+When using Subdivision Surface, use viewport level 2 / render level 3 as a
+starting default. See the matching technique skill for topology guidance.
 
 **6. Lighting and camera BEFORE detailed geometry.**
 
