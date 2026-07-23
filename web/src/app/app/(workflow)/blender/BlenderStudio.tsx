@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo } from "react";
 import type { CanvasProps } from "@/lib/workflows/types";
 import { useAgentChatContext } from "@/lib/hooks/AgentChatContext";
 import { useBlenderLease } from "./useBlenderState";
@@ -61,24 +61,6 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
   const leaseReady = lease?.state === "ready";
   const latestRender = renders[0] ?? null;
 
-  // Crossfade the viewport preview when a new render arrives. The previous
-  // <img> remounted on every `version` bump (key included version), leaving a
-  // black gap while the new bytes loaded. Now we keep a stable element and
-  // fade the fresh image in only once its network fetch completes, so the old
-  // pixels stay visible throughout the swap.
-  const [imgLoaded, setImgLoaded] = useState(false);
-  const lastSrcRef = useRef<string | null>(null);
-  const previewSrc = latestRender
-    ? `/api/workspace/${instanceId}/file/${latestRender.path}?v=${version ?? ""}`
-    : null;
-  useEffect(() => {
-    // When src changes (new render or version bump), hide until loaded.
-    if (previewSrc !== lastSrcRef.current) {
-      lastSrcRef.current = previewSrc;
-      setImgLoaded(false);
-    }
-  }, [previewSrc]);
-
   const handleRelease = async () => {
     // Set the pending-release flag synchronously BEFORE the fetch. This makes
     // the "Releasing…" button survive a lane unmount/remount (navigation away
@@ -130,12 +112,9 @@ export function BlenderStudio({ instanceId, state }: CanvasProps<BlenderState>) 
             <>
               <img
                 key={latestRender.path}
-                src={previewSrc ?? ""}
+                src={`/api/workspace/${instanceId}/file/${latestRender.path}?v=${version ?? ""}`}
                 alt={latestRender.label}
-                onLoad={() => setImgLoaded(true)}
-                className={`max-w-full max-h-full object-contain transition-opacity duration-200 ${
-                  imgLoaded ? "opacity-100" : "opacity-0"
-                }`}
+                className="max-w-full max-h-full object-contain"
               />
               {/* Download the current render. Mirrors the video workflow's
                   Download ↓ affordance (VideoStudio.tsx). */}

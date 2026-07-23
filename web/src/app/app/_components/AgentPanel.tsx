@@ -162,6 +162,21 @@ export function AgentPanel({
         </div>
       </div>
 
+      {/* Stationary step tracker — sits above the scroll area so the user
+          always has access to the next build step without scrolling up. */}
+      {isBlender && tutorialMode === "active" && (
+        <div className="shrink-0 px-3 pt-1">
+          <BuildStepTracker
+            steps={BLENDER_BUILD_STEPS}
+            completedStepIds={completedStepIds}
+            onPick={(prompt) => {
+              setInput(prompt);
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+          />
+        </div>
+      )}
+
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-3 py-3">
         {!chatActive ? (
           brandOpen ? (
@@ -177,21 +192,14 @@ export function AgentPanel({
               Pick a workflow or library on the left to start.
             </div>
           )
-        ) : isBlender && tutorialMode === "active" ? (
-          <BuildStepTracker
-            steps={BLENDER_BUILD_STEPS}
-            completedStepIds={completedStepIds}
-            onPick={(prompt) => {
-              setInput(prompt);
-              requestAnimationFrame(() => inputRef.current?.focus());
-            }}
-          />
         ) : chat.messages.length === 0 && !chat.error ? (
           <div className="flex flex-col gap-3">
             <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.02] p-4 text-center text-xs text-[var(--muted)]">
               {brandOpen
                 ? "Ask the AI to help with this card — or try an example below."
-                : "Ask the AI to help with this workflow — or try an example below."}
+                : isBlender
+                  ? "Ask the AI to help with this workflow — or try the steps below."
+                  : "Ask the AI to help with this workflow — or try an example below."}
             </div>
             {examples.length > 0 && (
               <div className="flex flex-col gap-1.5">

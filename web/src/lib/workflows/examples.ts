@@ -32,7 +32,7 @@ export const BLENDER_BUILD_STEPS: BuildStep[] = [
   {
     id: "rim",
     label: "Rim",
-    prompt: "Build step 1 of a bicycle wheel: create the rim as a torus — a wide, thin ring (think the outer hoop of a real bicycle wheel). Delete the default Cube first. Take a viewport screenshot to verify.",
+    prompt: "Build step 1 of a bicycle wheel: create the rim as a torus — a wide, thin ring (think the outer hoop of a real bicycle wheel). Delete the default Cube first. Frame the camera so the wheel fills most of the preview window. Take a viewport screenshot to verify.",
     matchKey: "Build step 1",
   },
   {
@@ -44,32 +44,26 @@ export const BLENDER_BUILD_STEPS: BuildStep[] = [
   {
     id: "spoke",
     label: "Spoke",
-    prompt: "Build step 3: create one spoke as a long, thin cylinder bridging from the hub up to the rim at the 12 o'clock position. It should reach the rim without overlapping it. Take a viewport screenshot to verify the placement.",
+    prompt: "Build step 3: create one spoke as a long, thin cylinder bridging from the hub outward to the rim. It should reach the rim without overlapping it. Take a viewport screenshot to verify the placement.",
     matchKey: "Build step 3",
   },
   {
-    id: "duplicate-one",
+    id: "duplicate",
     label: "Duplicate",
-    prompt: "Build step 4: rotate-duplicate the spoke once to the next position (30 degrees clockwise, one twelfth of a full turn around the hub). Take a viewport screenshot to verify the new spoke is vertical, perpendicular to the hub, and not tilted or offset before continuing.",
+    prompt: "Build step 4: duplicate the spoke around the wheel to create 12 evenly-spaced spokes, each perpendicular to the hub. Take a viewport screenshot to verify.",
     matchKey: "Build step 4",
-  },
-  {
-    id: "duplicate-all",
-    label: "Fan out",
-    prompt: "Build step 5: now repeat that same rotation to fill the wheel with 12 evenly-spaced spokes total (the original plus 11 copies). Take a viewport screenshot to verify all spokes are straight and evenly spaced.",
-    matchKey: "Build step 5",
   },
   {
     id: "assemble",
     label: "Assemble",
-    prompt: "Build step 6: assemble the wheel — create an AssemblyRoot empty, parent the rim and hub to it, and parent all spokes to the hub. Use the parent_object tool. Take a viewport screenshot to verify.",
-    matchKey: "Build step 6",
+    prompt: "Build step 5: assemble the wheel — create an AssemblyRoot empty, parent the rim and hub to it, and parent all spokes to the hub. Use the parent_object tool. Take a viewport screenshot to verify.",
+    matchKey: "Build step 5",
   },
   {
     id: "materials",
     label: "Materials",
-    prompt: "Build step 7: add materials — dark rubber for the rim, brushed metal for the hub and spokes. Take a viewport screenshot, then do a preview render to check the final look.",
-    matchKey: "Build step 7",
+    prompt: "Build step 6: add materials — dark rubber for the rim, brushed metal for the hub and spokes. Take a viewport screenshot, then do a preview render to check the final look.",
+    matchKey: "Build step 6",
   },
 ];
 
