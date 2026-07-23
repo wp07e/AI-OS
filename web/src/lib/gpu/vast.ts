@@ -20,7 +20,7 @@
  *     compute but preserves disk.
  */
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync, type ExecFileSyncOptions } from "node:child_process";
 import type {
   CreateInstanceOptions,
   Instance,
@@ -98,10 +98,131 @@ export interface CliResult {
  */
 export type Transport = (args: string[]) => Promise<CliResult>;
 
+/**
+ * execFileSync that returns stdout on success and undefined on any error
+ * (non-zero exit, ENOENT, etc.), instead of throwing. Used for best-effort
+ * lookups (login shell PATH, `command -v`) where failure just means "fall back
+ * to the next strategy".
+ */
+function tryExecFileSync(
+  cmd: string,
+  args: string[],
+  options?: ExecFileSyncOptions & { encoding?: "utf8" },
+): string | undefined {
+  try {
+    return execFileSync(cmd, args, { encoding: "utf8", ...options });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Find a login shell's user-configured PATH, so we can locate and spawn
+ * `vastai` exactly as the user has it set up — without guessing install
+ * directories (which differ between the macOS dev host and the Linux
+ * production server).
+ *
+ * `vastai` is typically installed per-user (pipx, uv, pyenv, homebrew, …) into
+ * a bin dir that is added to PATH only by a login shell's startup files
+ * (~/.zprofile, ~/.zshrc, ~/.bash_profile, pyenv init, etc.). The web app
+ * process (next dev/next start) is launched *without* that PATH, so a bare
+ * `spawn("vastai")` throws ENOENT even though the binary exists. Rather than
+ * hardcode candidate paths (wrong on at least one of our hosts), we ask a
+ * login shell to print its fully-resolved PATH and reuse it.
+ *
+ * Memoized for the process lifetime; the user's shell config won't change
+ * while the server runs.
+ */
+function resolveLoginPath(): string | undefined {
+  const out = tryExecFileSync(
+    // Ask the user's login shell to print its PATH. $SHELL is already the
+    // user's configured shell (zsh on macOS, bash/zsh on Linux). -ilc makes it
+    // source both the login AND interactive startup files — that's where pyenv,
+    // homebrew, conda, etc. prepend their bin dirs.
+    process.env.SHELL ?? "/bin/sh",
+    ["-ilc", "printf %s \"$PATH\""],
+  );
+  const path = out?.trim();
+  return path || undefined;
+}
+
+/**
+ * Absolute path to the `vastai` executable, resolved once on first use and
+ * memoized. Stays undefined if it can't be found.
+ */
+let resolvedVastaiBin: string | undefined;
+let resolvedVastaiBinAttempted = false;
+
+/**
+ * The user-configured PATH from a login shell, resolved once and memoized.
+ * Falls back to the process's inherited PATH if a login shell can't be run.
+ */
+const loginPath = resolveLoginPath();
+
+/**
+ * Resolve an absolute path to the `vastai` executable.
+ *
+ * The CLI is most commonly installed per-user, landing in a bin dir that is
+ * added to PATH only by a login shell. The web app process is usually launched
+ * without that PATH, so a bare `spawn("vastai")` throws ENOENT even though the
+ * binary exists. We resolve an absolute path explicitly so the spawn works no
+ * matter how the server was started — and, critically, so the resolved path is
+ * correct per-host without hardcoding directories (the dev server runs on macOS
+ * while production is Linux, and their install locations differ).
+ *
+ * Precedence:
+ *   1. $VASTAI_BIN override (set this if auto-detection ever fails).
+ *   2. `command -v vastai` against the login-shell PATH (no path guessing).
+ *   3. The bare name "vastai", as a last-resort fallback that lets spawn do
+ *      its own PATH lookup.
+ *
+ * The result is memoized for the process lifetime. Set VASTAI_BIN to force a
+ * specific path.
+ */
+function resolveVastaiBin(): string {
+  if (resolvedVastaiBinAttempted) return resolvedVastaiBin ?? "vastai";
+  resolvedVastaiBinAttempted = true;
+
+  const override = process.env.VASTAI_BIN;
+  if (override) {
+    resolvedVastaiBin = override;
+    return override;
+  }
+
+  if (loginPath) {
+    // `command -v` is POSIX and prints the absolute path (or nothing). Run it
+    // with the login-shell PATH so per-user bin dirs are searchable. execFileSync
+    // throws on non-zero exit; sync is fine — this runs once per process.
+    const out = tryExecFileSync("sh", ["-c", "command -v vastai"], {
+      env: { ...process.env, PATH: loginPath },
+    });
+    const bin = out?.trim();
+    if (bin) {
+      resolvedVastaiBin = bin;
+      return bin;
+    }
+  }
+
+  return "vastai";
+}
+
+/**
+ * The environment passed to spawned `vastai` processes: the inherited env with
+ * the login-shell PATH (which is what located vastai in the first place), so
+ * the CLI and any sub-processes it shells out to see the same user-configured
+ * bin dirs.
+ */
+function buildSpawnEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, PATH: loginPath ?? process.env.PATH };
+}
+
 /** Default transport: spawns the real `vastai` CLI on the host. */
 export const defaultTransport: Transport = (args) =>
   new Promise((resolveP, reject) => {
-    const proc = spawn("vastai", args, { stdio: ["ignore", "pipe", "pipe"] });
+    const proc = spawn(resolveVastaiBin(), args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildSpawnEnv(),
+    });
     let stdout = "";
     let stderr = "";
     proc.stdout.on("data", (d) => (stdout += d.toString()));
