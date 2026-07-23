@@ -96,7 +96,7 @@ export async function buildBlenderLeasePrefill(
     lines.push(`2. Renders: NEVER call bpy.ops.render.render via execute_code (it is BLOCKED — crashes the bridge). To preview, background run.py with nohup (ONE bash call, then return immediately):`);
     lines.push(`   echo '{"op":"preview","settings":{"samples":16,"resolution_x":960,"resolution_y":540}}' > '${instanceFolder}/request.json' && nohup setsid bash -c 'cd /app/blender && uv run --project /app/blender python /app/blender/run.py "${instanceFolder}" --request request.json' >> '${instanceFolder}/pipeline.log' 2>&1 &`);
     lines.push(`   Then poll state.json every ~10s (phase: starting → rendering → gpu_ready) and check exports/preview.png.`);
-    lines.push(`3. Camera: use aim_camera_at(camera, target) — it auto-positions distance from the bounding box. For tiny subjects pass explicit distance=. NEVER hand-calculate rotation.`);
+    lines.push(`3. Camera: use aim_camera_at(camera, target) — it auto-positions distance from the target's bounding box. Target AssemblyRoot for the FULL subject (all parts), or a specific part for a detail shot. NEVER hand-calculate rotation.`);
     lines.push(`4. Transforms: use apply_scale_safe(obj) — NEVER bpy.ops.object.transform_apply() (zeros locations, collapses models).`);
     lines.push(`5. Parenting: use parent_object(child, parent) — NEVER set obj.parent directly (doubles world position, causes disjointed parts).`);
     lines.push(`6. Never delete/recreate existing objects — modify in place. Destroying an object orphans all constraint targets and references (the scene-diff will flag this).`);

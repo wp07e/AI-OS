@@ -171,9 +171,12 @@ way. **Every** render needs a camera, so this is subject-independent.
   MCP tools. It creates a Damped Track constraint so the camera always looks at
   the target regardless of where either is moved. It auto-computes distance from
   the target's combined descendant bounding box (excluding hidden objects).
-- **Target a MESH, not an EMPTY** — aim at `Thorax` or `Head`, not
-  `AssemblyRoot`. Meshes have real geometry for the bounding box; empties have
-  none, so the fallback distance may be wrong.
+- **Target the AssemblyRoot (or parent of all parts) for full-subject framing.**
+  `aim_camera_at` computes distance from the target's combined descendant
+  bounding box. Targeting `AssemblyRoot` frames the entire model (all body
+  segments + legs + antennae). Targeting a specific part like `Thorax` frames
+  just that part + its children (closer, tighter — use only when you want a
+  detail shot). For the initial full-subject shot, always aim at the root.
 - **Build at a reasonable scale** (~1.0 unit for the whole subject, not 0.1).
   Tiny subjects are hard to frame, and the default Cube (2 units) contaminates
   bounding boxes. Delete the default Cube as your FIRST action.
