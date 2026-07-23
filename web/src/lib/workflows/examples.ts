@@ -21,8 +21,11 @@ export const WORKFLOW_EXAMPLES: Record<WorkflowType, string[]> = {
     "Assemble my clips into one final video.",
   ],
   blender: [
-    "Build a bicycle wheel step by step: first the rim (torus), then the hub (cylinder), then one spoke, duplicate the spokes around the wheel, assemble with parenting, then add materials. Verify each part with a viewport screenshot before moving to the next.",
-    "Create a simple mushroom: start with the stem (cylinder), add the cap (flattened sphere), add spots (small spheres on the cap), parent everything, then add materials. Check your work after each step.",
-    "Model a basic wooden table: build the tabletop first (box), then one leg, duplicate the legs to all four corners, assemble, then add a wood material. Take a viewport screenshot after each step to verify.",
+    "Build step 1 of a bicycle wheel: create the rim as a torus (outer radius 0.4, minor radius 0.03). Delete the default Cube first. Take a viewport screenshot to verify.",
+    "Build step 2: add the hub as a small cylinder in the center of the rim (radius 0.05, height 0.08). Take a viewport screenshot to verify.",
+    "Build step 3: create one spoke as a thin cylinder connecting the hub to the rim at the 12 o'clock position. Take a viewport screenshot to verify the placement.",
+    "Build step 4: duplicate the spoke around the wheel to create 12 evenly-spaced spokes. Take a viewport screenshot to verify.",
+    "Build step 5: assemble the wheel — create an AssemblyRoot empty, parent the rim and hub to it, and parent all spokes to the hub. Use the parent_object tool. Take a viewport screenshot to verify.",
+    "Build step 6: add materials — dark rubber for the rim, brushed metal for the hub and spokes. Take a viewport screenshot, then do a preview render to check the final look.",
   ],
 };
