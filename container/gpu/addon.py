@@ -930,7 +930,7 @@ class BlenderMCPServer:
             try:
                 import gpu
                 import numpy as np
-                from mathutils import Vector, Matrix
+                from mathutils import Vector, Matrix, Quaternion
 
                 r3d = space.region_3d
 
@@ -938,6 +938,8 @@ class BlenderMCPServer:
                 saved_view_matrix = r3d.view_matrix.copy()
                 saved_persp = r3d.view_perspective
                 saved_view_distance = getattr(r3d, 'view_distance', None)
+                saved_view_location = r3d.view_location.copy()
+                saved_view_rotation = r3d.view_rotation.copy()
 
                 if from_camera:
                     # Render from the scene camera's perspective.
@@ -948,40 +950,19 @@ class BlenderMCPServer:
                     r3d.view_perspective = 'CAMERA'
                     method = "offscreen_camera"
                 else:
-                    # Auto-frame the viewport around all VISIBLE mesh objects.
+                    # Auto-frame the viewport around all visible mesh objects.
                     # The editor viewport's default zoom/pan is uncontrollable
                     # from MCP and usually shows the subject as a tiny speck.
-                    # Compute a combined bounding box of all visible meshes and
-                    # reposition the view to encompass them — so the screenshot
-                    # always shows the subject regardless of editor state.
-                    pts = []
-                    for obj in bpy.data.objects:
-                        if obj.type == 'MESH' and obj.visible_get() and obj.data and obj.data.vertices:
-                            for c in obj.bound_box:
-                                pts.append(obj.matrix_world @ Vector(c))
-                    if pts:
-                        min_v = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
-                        max_v = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
-                        center = (min_v + max_v) / 2
-                        dims = max_v - min_v
-                        max_dim = max(dims.x, dims.y, dims.z, 0.1)
-                        # Place the view at a 3/4 angle, distance = 3x the max
-                        # dimension for comfortable framing.
-                        dist = max_dim * 3.0
-                        eye = center + Vector((dist * 0.7, -dist * 0.6, dist * 0.4))
-                        # Build a view matrix looking from eye toward center.
-                        import math
-                        direction = center - eye
-                        # Use Blender's convention: view_matrix is the inverse
-                        # of the camera-to-world matrix. Look in -Z, up is +Z.
-                        rot = direction.to_track_quat('-Z', 'Y')
-                        view_mat = Matrix.Translation(eye) @ rot.to_matrix().to_4x4()
-                        r3d.view_matrix = view_mat.inverted()
-                        r3d.view_perspective = 'PERSP'
-                        r3d.view_distance = dist
+                    # Use Blender's built-in view_all() operator to frame all
+                    # objects, which properly updates the view_matrix that
+                    # draw_view3d reads. Manual view_matrix/view_location setting
+                    # doesn't propagate to the offscreen render reliably.
+                    try:
+                        with bpy.context.temp_override(area=area, region=region, space=space):
+                            bpy.ops.view3d.view_all(center=True)
                         method = "offscreen_autoframe"
-                        if saved_view_distance is not None:
-                            pass  # will restore in finally
+                    except Exception as frame_err:
+                        print(f"[BlenderMCP] auto-frame view_all failed ({frame_err}), using default view", flush=True)
 
                 src_w, src_h = region.width, region.height
                 if max(src_w, src_h) > max_size:
@@ -1004,6 +985,8 @@ class BlenderMCPServer:
                     r3d.view_perspective = saved_persp
                     if saved_view_distance is not None:
                         r3d.view_distance = saved_view_distance
+                    r3d.view_location = saved_view_location
+                    r3d.view_rotation = saved_view_rotation
 
                 buf.dimensions = width * height * 4
                 pixels = np.asarray(buf, dtype=np.float32) / 255.0  # GPU buffer is 0..255

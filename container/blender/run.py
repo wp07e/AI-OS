@@ -168,6 +168,7 @@ def op_render(folder: str, request: dict) -> None:
     res_map = {"720p": (1280, 720), "1080p": (1920, 1080), "1440p": (2560, 1440), "4k": (3840, 2160)}
     res_x, res_y = res_map.get(resolution, (1920, 1080))
 
+    _log(f"render: engine={engine}, samples={samples}, res={res_x}x{res_y}, frames={frame_start}-{frame_end}")
     S.write_state(folder, "rendering", active={"op": "render", "label": f"Rendering {frame_start}-{frame_end} ({engine}, {samples} samples)"})
 
     code = f"""
@@ -187,11 +188,15 @@ scene.frame_end = {frame_end}
 bpy.ops.render.render(animation=True, write_still=True)
 print('RENDER_DONE')
 """
+    _log(f"render: sending render code to Blender socket (timeout=600s)…")
     resp = _send_to_blender(code, timeout=600.0)
+    _log(f"render: socket response status={resp.get('status', '?')}")
     if resp.get("status") == "error":
+        _log(f"render: FAILED — {resp.get('message', 'unknown')}")
         S.write_state(folder, "error", errors=[f"render failed: {resp.get('message', 'unknown')}"])
         sys.exit(1)
     if not resp.get("success") and not resp.get("status") == "success":
+        _log(f"render: FAILED — {resp.get('result', resp.get('message', 'unknown'))}")
         S.write_state(folder, "error", errors=[f"render failed: {resp.get('result', resp.get('message', 'unknown'))}"])
         sys.exit(1)
 
@@ -247,17 +252,22 @@ scene.render.filepath = '{RENDER_DIR_REMOTE}/preview.png'
 bpy.ops.render.render(write_still=True)
 print('PREVIEW_DONE')
 """
+    _log(f"preview: sending render code to Blender socket (timeout=600s)…")
     resp = _send_to_blender(code, timeout=600.0)
+    _log(f"preview: socket response status={resp.get('status', '?')}")
     # The addon returns {"status": "success", "result": {...}} on success, or
     # {"status": "error", "message": "..."} on error. _send_to_blender returns
     # {"success": False, "result": "..."} on socket failure. Check both paths.
     if resp.get("status") == "error":
+        _log(f"preview: FAILED — {resp.get('message', 'unknown')}")
         S.write_state(folder, "error", errors=[f"preview failed: {resp.get('message', 'unknown')}"])
         sys.exit(1)
     if not resp.get("success") and not resp.get("status") == "success":
+        _log(f"preview: FAILED — {resp.get('result', resp.get('message', 'unknown'))}")
         S.write_state(folder, "error", errors=[f"preview failed: {resp.get('result', resp.get('message', 'unknown'))}"])
         sys.exit(1)
 
+    _log(f"preview: render complete, writing gpu_ready state…")
     # Return to the idle-ready phase (not "complete", which the UI treats as a
     # final render). Clear errors so stale messages from prior failed runs don't
     # linger in the canvas. The renders[] entry is what the canvas displays.
@@ -327,6 +337,11 @@ signal.signal(signal.SIGTERM, _on_signal)
 signal.signal(signal.SIGINT, _on_signal)
 
 
+def _log(msg: str) -> None:
+    """Print a timestamped message to stdout (goes to pipeline.log via nohup redirect)."""
+    print(f"[{_now_iso()}] {msg}", flush=True)
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         print("usage: run.py <instance_folder> --request <request.json>", file=sys.stderr)
@@ -338,15 +353,19 @@ def main() -> int:
         if arg == "--request" and i + 1 < len(sys.argv):
             request_name = sys.argv[i + 1]
 
+    _log(f"run.py started — folder={folder}, request={request_name}")
+
     try:
         request = _read_request(folder, request_name)
     except Exception as e:
+        _log(f"FATAL: could not read request: {e}")
         traceback.print_exc()
         S.write_state(folder, "error", errors=[f"could not read request: {e}"])
         return 1
 
     op = request.get("op", "")
     _CURRENT["op"] = op
+    _log(f"op={op}, settings={request.get('settings', {})}")
     # Write a bootstrapping phase immediately so the canvas/agent can tell the
     # process actually started (vs. stuck at the route's "starting" patch from
     # a launch that died before run.py ran, e.g. the .venv permission failure).
@@ -367,10 +386,13 @@ def main() -> int:
         elif op == "sync_up":
             op_sync_up(folder)
         else:
+            _log(f"FATAL: unknown op: {op}")
             S.write_state(folder, "error", errors=[f"unknown op: {op}"])
             return 1
+        _log(f"op={op} completed successfully")
         return 0
     except Exception as e:
+        _log(f"FATAL: op={op} failed: {e}")
         traceback.print_exc()
         S.write_state(folder, "error", errors=[str(e)], active=None)
         return 1
