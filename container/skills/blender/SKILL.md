@@ -171,12 +171,12 @@ way. **Every** render needs a camera, so this is subject-independent.
   MCP tools. It creates a Damped Track constraint so the camera always looks at
   the target regardless of where either is moved. It auto-computes distance from
   the target's combined descendant bounding box (excluding hidden objects).
-- **Target the AssemblyRoot (or parent of all parts) for full-subject framing.**
-  `aim_camera_at` computes distance from the target's combined descendant
-  bounding box. Targeting `AssemblyRoot` frames the entire model (all body
-  segments + legs + antennae). Targeting a specific part like `Thorax` frames
-  just that part + its children (closer, tighter — use only when you want a
-  detail shot). For the initial full-subject shot, always aim at the root.
+- **Target the AssemblyRoot (or the parent of all parts) for full-subject
+  framing.** `aim_camera_at` computes distance from the target's combined
+  descendant bounding box. Targeting the root frames the entire model (all
+  parts). Targeting a specific child part frames just that part + its children
+  (closer, tighter — use only when you want a detail shot). For the initial
+  full-subject shot, always aim at the root.
 - **Build at a reasonable scale** (~1.0 unit for the whole subject, not 0.1).
   Tiny subjects are hard to frame, and the default Cube (2 units) contaminates
   bounding boxes. Delete the default Cube as your FIRST action.
@@ -208,14 +208,13 @@ geometry/assembly. After setting up the camera, take a from_camera screenshot
 for a quick framing check, then do a preview render to confirm definitively.
 
 **Zooming and focusing the viewport screenshot (both optional):**
-- `focus_object="Head"` — frames around a single object and its descendant
-  meshes, instead of all visible meshes. Use to inspect a specific area: e.g.
-  `focus_object="Thorax"` to check leg attachment points, or
-  `focus_object="Head"` to inspect antennae/eyes/mandibles.
+- `focus_object="<part_name>"` — frames around a single object and its
+  descendant meshes, instead of all visible meshes. Use to inspect a specific
+  area (e.g. a body segment, a limb, a sub-assembly).
 - `zoom=0.5` — closer (fills ~90% of frame, more detail). `zoom=2.0` — farther
   (fills ~30%, more context). Default is `1.0` (~60% of frame). Range 0.1–5.0.
-- Combine: `get_viewport_screenshot(focus_object="Head", zoom=0.5)` for a
-  tight close-up of just the head and its appendages.
+- Combine: `get_viewport_screenshot(focus_object="<part_name>", zoom=0.5)` for
+  a tight close-up of a specific part and its children.
 - Omit both for the default: all visible meshes framed at 1.0x.
 
 **4. Connected vs separate geometry — match the subject's anatomy.**
@@ -268,11 +267,11 @@ build.
 
 **7. Use a light preview material during construction.**
 
-Dark materials (e.g. dark brown chitin at Base Color 0.12, 0.07, 0.04) are
-invisible in low-sample EEVEE preview renders — they render as undifferentiated
-dark blobs. During construction, assign a **light gray clay material** (Base
-Color 0.8, 0.8, 0.8, roughness 0.5) so the form is visible in previews. Switch
-to the final materials only after geometry and framing are verified.
+Dark materials (e.g. Base Color below 0.15) are invisible in low-sample EEVEE
+preview renders — they render as undifferentiated dark blobs. During
+construction, assign a **light gray clay material** (Base Color 0.8, 0.8, 0.8,
+roughness 0.5) so the form is visible in previews. Switch to the final
+materials only after geometry and framing are verified.
 
 ### Retry & iteration caps (PREVENTS INFINITE-LOOP CRASHES)
 
