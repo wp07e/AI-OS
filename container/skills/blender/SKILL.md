@@ -170,14 +170,16 @@ way. **Every** render needs a camera, so this is subject-independent.
 - **Use `aim_camera_at(camera_name, target_name, lens=50)`** via the blender
   MCP tools. It creates a Damped Track constraint so the camera always looks at
   the target regardless of where either is moved. It auto-computes distance from
-  the target's combined descendant bounding box.
-- **For small subjects**, the auto-distance may still be too far. Pass an
-  explicit `distance=` — as a rule of thumb, use `distance = subject_length *
-  1.5`. For a 0.9-unit ant, that's ~1.3; for a 0.15-unit small insect, ~0.2.
-  When in doubt, start closer and pull back.
+  the target's combined descendant bounding box (excluding hidden objects).
+- **Target a MESH, not an EMPTY** — aim at `Thorax` or `Head`, not
+  `AssemblyRoot`. Meshes have real geometry for the bounding box; empties have
+  none, so the fallback distance may be wrong.
+- **Build at a reasonable scale** (~1.0 unit for the whole subject, not 0.1).
+  Tiny subjects are hard to frame, and the default Cube (2 units) contaminates
+  bounding boxes. Delete the default Cube as your FIRST action.
 - **Set up and verify the camera BEFORE building detailed geometry.** Use
   `get_viewport_screenshot(from_camera=True)` to see exactly what the camera
-  sees — the editor viewport view is useless for framing checks.
+  sees. Regular `get_viewport_screenshot()` auto-frames all visible meshes.
 - When a new camera appears, the scene-diff output will nudge you toward
   `aim_camera_at` — heed it.
 

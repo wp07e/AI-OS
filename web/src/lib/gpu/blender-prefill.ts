@@ -100,7 +100,8 @@ export async function buildBlenderLeasePrefill(
     lines.push(`4. Transforms: use apply_scale_safe(obj) — NEVER bpy.ops.object.transform_apply() (zeros locations, collapses models).`);
     lines.push(`5. Parenting: use parent_object(child, parent) — NEVER set obj.parent directly (doubles world position, causes disjointed parts).`);
     lines.push(`6. Never delete/recreate existing objects — modify in place. Destroying an object orphans all constraint targets and references (the scene-diff will flag this).`);
-    lines.push(`7. Verify early: get_viewport_screenshot after the first 2-3 parts. Use get_viewport_screenshot(from_camera=True) to check camera framing. Set up lighting + camera BEFORE detailed geometry — use a light gray preview material so the form is visible.`);
+    lines.push(`7. Verify early: get_viewport_screenshot after the first 2-3 parts. It auto-frames all visible meshes. Use get_viewport_screenshot(from_camera=True) to check camera framing. Set up lighting + camera BEFORE detailed geometry — use a light gray preview material so the form is visible.`);
+    lines.push(`8. FIRST ACTION: delete the default Cube (bpy.data.objects['Cube'] — it contaminates bounding boxes and viewport). Build at a scale of ~1.0 unit, not 0.1 — tiny subjects are hard to frame.`);
     lines.push(``);
     lines.push(`If blender tools return "Connection refused", wait ~30-60s and retry — the host watchdog auto-restarts Blender. Your scene.blend is preserved.`);
     if (phase && RENDER_BUSY_PHASES.has(phase)) {
