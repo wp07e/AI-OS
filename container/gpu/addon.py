@@ -944,11 +944,13 @@ class BlenderMCPServer:
 
                 if from_camera:
                     # Render from the scene camera's perspective.
+                    # Same approach as auto-frame: compute the view matrix and
+                    # pass it directly to draw_view3d, bypassing r3d (which
+                    # Blender overwrites/recalculates in headless mode).
                     cam = bpy.context.scene.camera
                     if cam is None:
                         return {"error": "from_camera=True but no scene camera set (bpy.context.scene.camera is None)"}
-                    r3d.view_matrix = cam.matrix_world.inverted()
-                    r3d.view_perspective = 'CAMERA'
+                    custom_view_matrix = cam.matrix_world.inverted()
                     method = "offscreen_camera"
                 else:
                     # Auto-frame the viewport around all visible mesh objects.
@@ -994,9 +996,10 @@ class BlenderMCPServer:
                 else:
                     width, height = src_w, src_h
 
-                # Use the custom view matrix if auto-framing, otherwise use
-                # the region's current view matrix.
-                draw_view_matrix = custom_view_matrix if method == "offscreen_autoframe" else r3d.view_matrix
+                # Use the custom view matrix for auto-frame and camera modes
+                # (computed above, bypassing r3d). Otherwise use the region's
+                # current view matrix (fallback window_grab path).
+                draw_view_matrix = custom_view_matrix if custom_view_matrix is not None else r3d.view_matrix
 
                 offscreen = gpu.types.GPUOffScreen(width, height)
                 try:

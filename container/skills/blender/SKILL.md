@@ -178,18 +178,31 @@ way. **Every** render needs a camera, so this is subject-independent.
   Tiny subjects are hard to frame, and the default Cube (2 units) contaminates
   bounding boxes. Delete the default Cube as your FIRST action.
 - **Set up and verify the camera BEFORE building detailed geometry.** Use
-  `get_viewport_screenshot(from_camera=True)` to see exactly what the camera
-  sees. Regular `get_viewport_screenshot()` auto-frames all visible meshes.
+  `get_viewport_screenshot(from_camera=True)` for a quick camera framing check.
+  Regular `get_viewport_screenshot()` auto-frames all visible meshes (for
+  geometry/assembly inspection).
 - When a new camera appears, the scene-diff output will nudge you toward
   `aim_camera_at` — heed it.
 
-**3. Viewport-first verification.**
+**3. Verification: viewport screenshots vs preview renders.**
 
-After the first 2–3 parts are assembled (before any detail work), call
-`get_viewport_screenshot` to visually confirm framing and assembly. This is the
-cheapest verification step available — do **not** wait for the first preview
-render to discover a camera or assembly problem. The longer a defect goes
-unseen, the more geometry is built on top of it.
+Two verification tools serve different purposes:
+
+- **`get_viewport_screenshot()`** (fast, no render): auto-frames all visible
+  meshes. Use for checking geometry, assembly, part positions, and hierarchy.
+  Shows solid shading, not render materials/lighting.
+- **`get_viewport_screenshot(from_camera=True)`** (fast): shows what the scene
+  camera sees — use for a quick framing check. Still shows solid shading.
+- **Preview render via run.py** (slower, ~15-30s): the definitive camera
+  output — shows actual materials, lighting, and render engine output. **Always
+  prefer a preview render for final camera framing verification.** Viewport
+  screenshots approximate the camera view but don't show render materials, so
+  framing decisions based on them can be misleading (dark materials appear
+  invisible, lighting isn't represented).
+
+After the first 2–3 parts are assembled, take a viewport screenshot to check
+geometry/assembly. After setting up the camera, take a from_camera screenshot
+for a quick framing check, then do a preview render to confirm definitively.
 
 **Two kinds of viewport screenshot:**
 - `get_viewport_screenshot()` (default) — shows the **editor's free-look view**.
