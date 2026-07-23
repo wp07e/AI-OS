@@ -103,7 +103,7 @@ immediately retry** (see retry caps below).
 
 ### Multi-part assembly protocol (PREVENTS DETACHED PARTS)
 
-This is the recipe that stops legs, heads, and wings from floating off the body.
+This is the recipe that stops parts from floating away from the assembly.
 For any model with more than one part:
 
 1. **Create a single root empty (`AssemblyRoot`) as the FIRST step.** Every body
@@ -140,8 +140,9 @@ For any model with more than one part:
 ### Modeling technique footguns (general-purpose)
 
 These are the low-level Blender technique traps that burn first renders on
-**any** subject — creatures, characters, vehicles, props. They are not in the
-specialist technique skills, so they live here as your baseline guardrails.
+**any** subject — creatures, characters, vehicles, props, architecture, simple
+shapes. They are not in the specialist technique skills, so they live here as
+your baseline guardrails.
 
 **1. Transform application — `transform_apply` zeroes locations.**
 
@@ -217,36 +218,30 @@ for a quick framing check, then do a preview render to confirm definitively.
   a tight close-up of a specific part and its children.
 - Omit both for the default: all visible meshes framed at 1.0x.
 
-**4. Connected vs separate geometry — match the subject's anatomy.**
+**4. Connected vs separate geometry — match the subject's structure.**
 
-The right approach depends on the subject's actual anatomy. Read the matching
-technique skill (Step 0) for the authoritative anatomy table — if it says
-"segmented body," the segments ARE separate and that's correct.
+The right approach depends on what you're building. Read the matching technique
+skill (Step 0) for authoritative guidance. General principles by subject type:
 
-- **Continuous-surface creatures** (slime, worms, blobs, character torsos where
-  muscle flows): build as a **single connected mesh** via Edit Mode extrusion +
-  scaling, with bridge edge loops between forms. Separate UV spheres look
-  disjointed here because the surface should flow continuously.
-- **Segmented exoskeleton creatures** (ants, beetles, spiders, crabs — anything
-  the anatomy table calls "Insectoid: Arthropod"): **separate segments that
-  overlap at the joints** is correct — the exoskeleton segments are genuinely
-  distinct rigid plates. The key: the segments must **overlap/connect at the
-  petioles** (the thin waist joints), not leave visible gaps. A single blended
-  mesh would look wrong for an arthropod.
-- **Subjects with distinct rigid parts** (machinery, vehicles, armored
-  creatures): separate meshes + the assembly protocol above are correct — the
-  gaps are intentional.
-- **Organic appendages** (legs, antennae, tentacles, vines, cables): prefer
-  **Bezier curves with a circular bevel** over raw cylinders. Curves give
-  smooth, natural bends with fewer vertices and articulated joints. Create a
-  Bezier curve, set its `bevel_depth` for thickness. **Always pass
-  `location=(x,y,z)` when creating curves** — without it the curve object's
-  origin stays at (0,0,0) even if the bezier points are positioned correctly in
-  local space, so the part appears at the wrong world position after
-  `convert(target='MESH')`. **Note:** curves render as thin wireframe lines in
-  viewport screenshots until converted to mesh — call
-  `bpy.ops.object.convert(target='MESH')` before taking a viewport grab so you
-  can verify the actual form.
+- **Single continuous forms** (a moon, a boulder, a slime creature, a vase):
+  build as a **single mesh**. Separate primitives always look disjointed where
+  the surface should flow continuously.
+- **Multi-part assemblies with rigid components** (a house with walls/roof/
+  doors, machinery, vehicles, furniture, armored characters): **separate
+  meshes** + the assembly protocol above are correct — the gaps between parts
+  are intentional and realistic.
+- **Segmented organic subjects** (insects, arthropods): follow the anatomy
+  table in the matching technique skill — separate segments that overlap at
+  the joints is typically correct for exoskeleton creatures.
+- **Organic appendages or curves** (cables, pipes, tentacles, vines, ropes):
+  prefer **Bezier curves with a circular bevel** over raw cylinders. Curves
+  give smooth bends with fewer vertices. **Always pass `location=(x,y,z)` when
+  creating curves** — without it the curve object's origin stays at (0,0,0)
+  even if the bezier points are positioned correctly, so the part appears at
+  the wrong world position after `convert(target='MESH')`. **Note:** curves
+  render as thin wireframe lines in viewport screenshots until converted to
+  mesh — call `bpy.ops.object.convert(target='MESH')` before taking a viewport
+  grab so you can verify the actual form.
 
 **5. Subdivision Surface — levels and support loops.**
 
