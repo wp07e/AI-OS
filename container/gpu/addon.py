@@ -927,6 +927,7 @@ class BlenderMCPServer:
                 return {"error": "No 3D viewport found"}
 
             method = "offscreen"
+            custom_view_matrix = None
             try:
                 import gpu
                 import numpy as np
@@ -951,18 +952,40 @@ class BlenderMCPServer:
                     method = "offscreen_camera"
                 else:
                     # Auto-frame the viewport around all visible mesh objects.
-                    # The editor viewport's default zoom/pan is uncontrollable
-                    # from MCP and usually shows the subject as a tiny speck.
-                    # Use Blender's built-in view_all() operator to frame all
-                    # objects, which properly updates the view_matrix that
-                    # draw_view3d reads. Manual view_matrix/view_location setting
-                    # doesn't propagate to the offscreen render reliably.
-                    try:
-                        with bpy.context.temp_override(area=area, region=region, space=space):
-                            bpy.ops.view3d.view_all(center=True)
+                    # The editor viewport's default zoom in headless mode is
+                    # ~18 units away, making subjects invisible.
+                    #
+                    # CRITICAL: setting r3d.view_matrix directly doesn't work —
+                    # Blender recalculates it from view_location/view_distance/
+                    # view_rotation, overwriting our value. And setting those
+                    # properties doesn't update view_matrix synchronously in
+                    # headless mode (no event loop to trigger recalculation).
+                    #
+                    # SOLUTION: compute the view matrix ourselves and pass it
+                    # DIRECTLY to draw_view3d as a parameter, bypassing r3d
+                    # entirely. draw_view3d accepts the matrix as an argument.
+                    pts = []
+                    for obj in bpy.data.objects:
+                        if obj.type == 'MESH' and obj.visible_get() and not obj.hide_viewport and obj.data and obj.data.vertices:
+                            for c in obj.bound_box:
+                                pts.append(obj.matrix_world @ Vector(c))
+                    if pts:
+                        min_v = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
+                        max_v = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
+                        center = (min_v + max_v) / 2
+                        dims = max_v - min_v
+                        max_dim = max(dims.x, dims.y, dims.z, 0.1)
+                        # 1.5x max_dim fills ~60% of the viewport frame.
+                        dist = max(max_dim * 1.5, 0.3)
+                        # Compute eye position at a 3/4 front-right-above angle.
+                        eye = center + Vector((dist * 0.7, -dist * 0.6, dist * 0.4))
+                        direction = center - eye
+                        # Build the view matrix (world-to-view = inverse of
+                        # camera-to-world). Look down -Z, up is +Y.
+                        rot = direction.to_track_quat('-Z', 'Y')
+                        cam_to_world = Matrix.Translation(eye) @ rot.to_matrix().to_4x4()
+                        custom_view_matrix = cam_to_world.inverted()
                         method = "offscreen_autoframe"
-                    except Exception as frame_err:
-                        print(f"[BlenderMCP] auto-frame view_all failed ({frame_err}), using default view", flush=True)
 
                 src_w, src_h = region.width, region.height
                 if max(src_w, src_h) > max_size:
@@ -971,11 +994,15 @@ class BlenderMCPServer:
                 else:
                     width, height = src_w, src_h
 
+                # Use the custom view matrix if auto-framing, otherwise use
+                # the region's current view matrix.
+                draw_view_matrix = custom_view_matrix if method == "offscreen_autoframe" else r3d.view_matrix
+
                 offscreen = gpu.types.GPUOffScreen(width, height)
                 try:
                     offscreen.draw_view3d(
                         bpy.context.scene, bpy.context.view_layer, space, region,
-                        r3d.view_matrix, r3d.window_matrix, do_color_management=True,
+                        draw_view_matrix, r3d.window_matrix, do_color_management=True,
                     )
                     buf = offscreen.texture_color.read()
                 finally:
