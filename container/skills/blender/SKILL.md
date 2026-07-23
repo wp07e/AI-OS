@@ -204,13 +204,16 @@ After the first 2–3 parts are assembled, take a viewport screenshot to check
 geometry/assembly. After setting up the camera, take a from_camera screenshot
 for a quick framing check, then do a preview render to confirm definitively.
 
-**Two kinds of viewport screenshot:**
-- `get_viewport_screenshot()` (default) — shows the **editor's free-look view**.
-  Use this to check overall assembly, part positions, and hierarchy.
-- `get_viewport_screenshot(from_camera=True)` — shows **what the scene camera
-  sees**. Use this to verify framing after `aim_camera_at`. The editor view and
-  camera view are completely different — checking framing with the editor view
-  is useless. Always use `from_camera=True` when verifying camera placement.
+**Zooming and focusing the viewport screenshot (both optional):**
+- `focus_object="Head"` — frames around a single object and its descendant
+  meshes, instead of all visible meshes. Use to inspect a specific area: e.g.
+  `focus_object="Thorax"` to check leg attachment points, or
+  `focus_object="Head"` to inspect antennae/eyes/mandibles.
+- `zoom=0.5` — closer (fills ~90% of frame, more detail). `zoom=2.0` — farther
+  (fills ~30%, more context). Default is `1.0` (~60% of frame). Range 0.1–5.0.
+- Combine: `get_viewport_screenshot(focus_object="Head", zoom=0.5)` for a
+  tight close-up of just the head and its appendages.
+- Omit both for the default: all visible meshes framed at 1.0x.
 
 **4. Connected vs separate geometry — match the subject's anatomy.**
 

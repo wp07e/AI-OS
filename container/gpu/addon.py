@@ -888,7 +888,7 @@ class BlenderMCPServer:
 
         return obj_info
 
-    def get_viewport_screenshot(self, max_size=800, filepath=None, format="png", from_camera=False):
+    def get_viewport_screenshot(self, max_size=800, filepath=None, format="png", from_camera=False, focus_object=None, zoom=1.0):
         """
         Capture a screenshot of the current 3D viewport and save it to the specified path.
 
@@ -901,6 +901,15 @@ class BlenderMCPServer:
           for verifying camera framing — the editor viewport shows a completely
           different view than the camera, so a normal screenshot can't catch
           framing issues. Uses the scene's active camera.
+        - focus_object: Name of an object to frame the screenshot around (instead
+          of all visible meshes). The object's bounding box (plus its descendant
+          meshes) is used for framing. Use this to zoom in on a specific part —
+          e.g. focus_object="Head" to inspect just the head and its children
+          (antennae, eyes, mandibles). When omitted, all visible meshes are framed.
+        - zoom: Multiplier on the auto-frame distance. 1.0 = default framing
+          (subject fills ~60% of frame). 0.5 = closer/zoomed in (fills ~90%).
+          2.0 = farther/zoomed out (fills ~30%). Range: 0.1 to 5.0. Use this to
+          inspect detail (zoom < 1.0) or get wider context (zoom > 1.0).
 
         Returns success/error status
         """
@@ -953,9 +962,8 @@ class BlenderMCPServer:
                     custom_view_matrix = cam.matrix_world.inverted()
                     method = "offscreen_camera"
                 else:
-                    # Auto-frame the viewport around all visible mesh objects.
-                    # The editor viewport's default zoom in headless mode is
-                    # ~18 units away, making subjects invisible.
+                    # Auto-frame the viewport around all visible mesh objects
+                    # (or a focused object if focus_object is specified).
                     #
                     # CRITICAL: setting r3d.view_matrix directly doesn't work —
                     # Blender recalculates it from view_location/view_distance/
@@ -966,11 +974,42 @@ class BlenderMCPServer:
                     # SOLUTION: compute the view matrix ourselves and pass it
                     # DIRECTLY to draw_view3d as a parameter, bypassing r3d
                     # entirely. draw_view3d accepts the matrix as an argument.
-                    pts = []
-                    for obj in bpy.data.objects:
-                        if obj.type == 'MESH' and obj.visible_get() and not obj.hide_viewport and obj.data and obj.data.vertices:
-                            for c in obj.bound_box:
-                                pts.append(obj.matrix_world @ Vector(c))
+                    #
+                    # focus_object narrows the framing to a single object + its
+                    # descendants. zoom scales the distance: <1.0 = closer
+                    # (more detail), >1.0 = farther (more context).
+                    zoom = max(0.1, min(5.0, float(zoom)))
+
+                    if focus_object:
+                        # Frame around a single object and its descendant meshes.
+                        focus_obj = bpy.data.objects.get(focus_object)
+                        if focus_obj is None:
+                            return {"error": f"focus_object '{focus_object}' not found"}
+
+                        def _collect_bbox_pts(obj):
+                            """World-space bbox corners of obj + all descendant meshes."""
+                            pts = []
+                            if obj.type == 'MESH' and obj.visible_get() and not obj.hide_viewport and obj.data and obj.data.vertices:
+                                for c in obj.bound_box:
+                                    pts.append(obj.matrix_world @ Vector(c))
+                            for child in obj.children:
+                                pts.extend(_collect_bbox_pts(child))
+                            return pts
+
+                        pts = _collect_bbox_pts(focus_obj)
+                        if not pts:
+                            # No mesh geometry found — use the object's location.
+                            pts = [Vector(focus_obj.location)]
+                        method = "offscreen_autoframe_focus"
+                    else:
+                        # Frame around ALL visible meshes.
+                        pts = []
+                        for obj in bpy.data.objects:
+                            if obj.type == 'MESH' and obj.visible_get() and not obj.hide_viewport and obj.data and obj.data.vertices:
+                                for c in obj.bound_box:
+                                    pts.append(obj.matrix_world @ Vector(c))
+                        method = "offscreen_autoframe"
+
                     if pts:
                         min_v = Vector((min(p.x for p in pts), min(p.y for p in pts), min(p.z for p in pts)))
                         max_v = Vector((max(p.x for p in pts), max(p.y for p in pts), max(p.z for p in pts)))
@@ -978,7 +1017,9 @@ class BlenderMCPServer:
                         dims = max_v - min_v
                         max_dim = max(dims.x, dims.y, dims.z, 0.1)
                         # 1.5x max_dim fills ~60% of the viewport frame.
-                        dist = max(max_dim * 1.5, 0.3)
+                        # zoom scales the distance: 0.5 = closer (fills more),
+                        # 2.0 = farther (fills less).
+                        dist = max(max_dim * 1.5 * zoom, 0.1)
                         # Compute eye position at a 3/4 front-right-above angle.
                         eye = center + Vector((dist * 0.7, -dist * 0.6, dist * 0.4))
                         direction = center - eye
@@ -987,7 +1028,6 @@ class BlenderMCPServer:
                         rot = direction.to_track_quat('-Z', 'Y')
                         cam_to_world = Matrix.Translation(eye) @ rot.to_matrix().to_4x4()
                         custom_view_matrix = cam_to_world.inverted()
-                        method = "offscreen_autoframe"
 
                 src_w, src_h = region.width, region.height
                 if max(src_w, src_h) > max_size:
