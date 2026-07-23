@@ -27,12 +27,15 @@ export const runtime = "nodejs";
  * Wall-clock ceiling for a single streaming turn, in seconds. Enforced two ways:
  *   - Next.js production/serverless `maxDuration` (ignored in `next dev`).
  *   - the internal deadline loop in `drivePrompt` (runs everywhere, incl. dev).
- * Keep these in sync via the shared `STREAM_DEADLINE_MS` constant below so the
- * platform cap and the JS deadline can never drift apart. Long agentic turns
- * (carousels, Blender, multi-step tool use) can run well past 10 minutes.
+ * Keep `maxDuration` and `STREAM_DEADLINE_SECONDS` in sync so the platform cap
+ * and the JS deadline can never drift apart. Long agentic turns (carousels,
+ * Blender, multi-step tool use) can run well past 10 minutes.
+ *
+ * NOTE: `maxDuration` must be a literal number — Next.js statically analyzes
+ * route-segment-config exports and rejects identifier references.
  */
 const STREAM_DEADLINE_SECONDS = 30 * 60; // 30 minutes
-export const maxDuration = STREAM_DEADLINE_SECONDS;
+export const maxDuration = 1800; // == STREAM_DEADLINE_SECONDS (30 minutes)
 const STREAM_DEADLINE_MS = STREAM_DEADLINE_SECONDS * 1000;
 
 /**
