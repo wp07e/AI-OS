@@ -6,7 +6,7 @@ import { useGenerationBusy } from "@/lib/hooks/GenerationBusyContext";
 import type { ChatMessage, StreamingState } from "@/lib/hooks/useAgentChat";
 import type { BrandCardKey } from "@/lib/brand/cards";
 import { BRAND_CARD_EXAMPLES, brandInputPlaceholder } from "@/lib/brand/examples";
-import { WORKFLOW_EXAMPLES } from "@/lib/workflows/examples";
+import { BLENDER_BUILD_STEPS, WORKFLOW_EXAMPLES } from "@/lib/workflows/examples";
 
 interface Props {
   /** Active workflow instance id, or null when nothing is selected. */
@@ -51,6 +51,26 @@ export function AgentPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  // Blender-lane-only tutorial state machine. Clicking a build-step example
+  // opts the user INTO the tutorial stepper (persists across messages). Sending
+  // an unrelated first message opts them OUT for the session. Reset on lane
+  // switch.
+  const [tutorialMode, setTutorialMode] = useState<"idle" | "active" | "declined">("idle");
+  const [prevInstanceId, setPrevInstanceId] = useState(workflowInstanceId);
+  if (workflowInstanceId !== prevInstanceId) {
+    setPrevInstanceId(workflowInstanceId);
+    setTutorialMode("idle");
+  }
+
+  const isBlender = workflowType === "blender";
+
+  // Steps that have been confirmed sent (matched against user messages).
+  const completedStepIds = new Set(
+    BLENDER_BUILD_STEPS.filter((s) =>
+      chat.messages.some((m) => m.role === "user" && m.content.includes(s.matchKey)),
+    ).map((s) => s.id),
+  );
+
   const brandOpen = activeLibrary === "brand";
   // Lane chat is active as soon as a lane is open. Brand chat is active only
   // after the user clicks "Ask AI" on a card.
@@ -66,6 +86,14 @@ export function AgentPanel({
     const text = input.trim();
     if (!text || !chatActive || laneDeleting) return;
     setInput("");
+    // Blender tutorial opt-out: if the user is still in the initial idle state
+    // and sends a message that isn't one of the build-step prompts, assume
+    // they're not following the tutorial and hide it for the session. If they
+    // pasted a step prompt without clicking the button, treat as opt-in.
+    if (isBlender && tutorialMode === "idle") {
+      const matchesStep = BLENDER_BUILD_STEPS.some((s) => text.includes(s.matchKey));
+      setTutorialMode(matchesStep ? "active" : "declined");
+    }
     // Steer: if the agent is mid-response, interrupt the current turn then send
     // the new message as a fresh turn in the same session (opencode's modern
     // steer model — no "steering reminder" metadata, which broke prompt caching).
@@ -149,6 +177,15 @@ export function AgentPanel({
               Pick a workflow or library on the left to start.
             </div>
           )
+        ) : isBlender && tutorialMode === "active" ? (
+          <BuildStepTracker
+            steps={BLENDER_BUILD_STEPS}
+            completedStepIds={completedStepIds}
+            onPick={(prompt) => {
+              setInput(prompt);
+              requestAnimationFrame(() => inputRef.current?.focus());
+            }}
+          />
         ) : chat.messages.length === 0 && !chat.error ? (
           <div className="flex flex-col gap-3">
             <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.02] p-4 text-center text-xs text-[var(--muted)]">
@@ -162,6 +199,8 @@ export function AgentPanel({
                   <button
                     key={ex}
                     onClick={() => {
+                      // Blender: clicking a build step opts into the tutorial.
+                      if (isBlender) setTutorialMode("active");
                       setInput(ex);
                       requestAnimationFrame(() => inputRef.current?.focus());
                     }}
@@ -310,5 +349,55 @@ function Dot({ delay }: { delay: string }) {
       className="inline-block h-1.5 w-1.5 animate-bounce rounded-full bg-[var(--muted)]"
       style={{ animationDelay: delay, animationDuration: "0.9s" }}
     />
+  );
+}
+
+/**
+ * Compact stepper shown for the blender build-step tutorial once the user has
+ * opted in. Completed steps render as checked; the first uncompleted step is
+ * accented as "next". Clicking any step fills the input with its prompt.
+ */
+function BuildStepTracker({
+  steps,
+  completedStepIds,
+  onPick,
+}: {
+  steps: typeof BLENDER_BUILD_STEPS;
+  completedStepIds: Set<string>;
+  onPick: (prompt: string) => void;
+}) {
+  const nextStep =
+    steps.find((s) => !completedStepIds.has(s.id)) ?? null;
+  return (
+    <div className="mb-2 flex flex-wrap items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.02] p-2">
+      {steps.map((s, i) => {
+        const done = completedStepIds.has(s.id);
+        const isNext = nextStep?.id === s.id;
+        return (
+          <div key={s.id} className="flex items-center gap-1.5">
+            <button
+              onClick={() => onPick(s.prompt)}
+              title={s.prompt}
+              className={[
+                "flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] font-medium transition",
+                done
+                  ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-200"
+                  : isNext
+                    ? "border-indigo-400/50 bg-indigo-500/15 text-indigo-100"
+                    : "border-white/10 bg-white/[0.03] text-[var(--foreground)]/60 hover:border-indigo-400/40 hover:bg-indigo-500/10 hover:text-indigo-200",
+              ].join(" ")}
+            >
+              <span>{done ? "✓" : isNext ? "›" : i + 1}</span>
+              <span>{s.label}</span>
+            </button>
+            {i < steps.length - 1 && (
+              <span className="text-[var(--muted)]/40" aria-hidden>
+                →
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 }
