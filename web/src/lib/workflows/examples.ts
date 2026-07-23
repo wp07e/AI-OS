@@ -20,4 +20,9 @@ export const WORKFLOW_EXAMPLES: Record<WorkflowType, string[]> = {
   video: [
     "Assemble my clips into one final video.",
   ],
+  blender: [
+    "Build a bicycle wheel step by step: first the rim (torus), then the hub (cylinder), then one spoke, duplicate the spokes around the wheel, assemble with parenting, then add materials. Verify each part with a viewport screenshot before moving to the next.",
+    "Create a simple mushroom: start with the stem (cylinder), add the cap (flattened sphere), add spots (small spheres on the cap), parent everything, then add materials. Check your work after each step.",
+    "Model a basic wooden table: build the tabletop first (box), then one leg, duplicate the legs to all four corners, assemble, then add a wood material. Take a viewport screenshot after each step to verify.",
+  ],
 };
