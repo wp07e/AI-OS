@@ -146,6 +146,10 @@ function VideoForm({
     : resOptions[resOptions.length - 1].value;
   const withSeed = effectiveStartMode === "seed";
   const selectedClip = clips.find((c) => c.index === selectedClipIndex) ?? null;
+  // A starting frame is active when continuing from a prior clip's last frame
+  // OR a non-"none" starting-frame mode is selected (Brand/Generate/Image).
+  // When active it occupies @image1, so user references begin at @image2.
+  const hasStartingFrame = continuity === "last_frame" || effectiveStartMode !== "none";
 
   const canSubmit =
     prompt.trim().length > 0 &&
@@ -199,6 +203,7 @@ function VideoForm({
     });
     if (ok) {
       setPrompt("");
+      setReferences([]);
       onSubmitted?.();
     }
     void sourceType; // advisory; the script records sourceType in state
@@ -369,14 +374,15 @@ function VideoForm({
           Reference images guide the model&apos;s understanding of subjects and visual style. Reference them
           in your prompt by selection order: <code className="rounded bg-white/10 px-1">@image1</code>,{" "}
           <code className="rounded bg-white/10 px-1">@image2</code>, etc.
-          {continuity === "last_frame" && references.length > 0 && (
-            <>
-              {" "}The last frame becomes{" "}
-              <code className="rounded bg-white/10 px-1">@image1</code>, so your first reference is{" "}
-              <code className="rounded bg-white/10 px-1">@image2</code>, etc.
-            </>
-          )}
         </p>
+        {hasStartingFrame && (
+          <p className="mt-1.5 rounded-md border border-red-400/40 bg-red-500/10 px-2 py-1.5 text-[10px] font-medium leading-relaxed text-red-300">
+            ⚠️ A starting frame is active, so it occupies{" "}
+            <code className="rounded bg-red-500/20 px-1">@image1</code>. Your selected references
+            start at <code className="rounded bg-red-500/20 px-1">@image2</code> — reference them
+            accordingly in your prompt.
+          </p>
+        )}
       </Field>
 
       {images.length > 0 && (
@@ -500,6 +506,7 @@ function ImageForm({
     });
     if (ok) {
       setPrompt("");
+      setReferences([]);
       onSubmitted?.();
     }
   };

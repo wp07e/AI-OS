@@ -133,7 +133,7 @@ export function ReferenceGrid({ instanceId, kit, uploads, selected, onToggle, on
       <input
         ref={fileRef}
         type="file"
-        accept="image/png,image/jpeg,image/gif,image/webp"
+        accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime"
         onChange={handleUpload}
         className="hidden"
       />
@@ -143,7 +143,7 @@ export function ReferenceGrid({ instanceId, kit, uploads, selected, onToggle, on
         disabled={uploading}
         className="rounded-lg border border-dashed border-white/15 px-2 py-1.5 text-[10px] text-[var(--muted)] transition hover:border-indigo-400/40 hover:text-indigo-300 disabled:opacity-50"
       >
-        {uploading ? "Uploading…" : "+ Upload reference image"}
+        {uploading ? "Uploading…" : "+ Upload reference image or video"}
       </button>
     </div>
   );

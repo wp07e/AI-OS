@@ -534,11 +534,11 @@ function ClipCard(props: {
                   })}
                 </div>
               )}
-              <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp"
+              <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm,video/quicktime"
                 onChange={handleUpload} className="hidden" />
               <button type="button" onClick={() => fileRef.current?.click()} disabled={uploading}
                 className="rounded-lg border border-dashed border-white/15 px-2 py-1.5 text-[10px] text-[var(--muted)] transition hover:border-indigo-400/40 hover:text-indigo-300">
-                {uploading ? "Uploading…" : "+ Upload reference image"}
+                {uploading ? "Uploading…" : "+ Upload reference image or video"}
               </button>
             </div>
           )}

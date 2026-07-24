@@ -314,6 +314,58 @@ def _resolve_starting_frame(
     return None, extras
 
 
+def _filter_refs_by_prompt(
+    prompt: str, user_refs: list[str], offset: int
+) -> tuple[str, list[str]]:
+    """Filter the selected reference images to only those the prompt references
+    via @imageN tokens, and renumber the surviving tokens to a contiguous list.
+
+    Slots are 1-based. When ``offset == 1`` slot 1 is occupied by the starting
+    frame (last-frame / brand / instance image), so user references start at
+    @image2; when ``offset == 0`` user references start at @image1.
+
+    If the prompt contains NO @imageN tokens — or every referenced token maps to
+    no real slot (all overflow) — everything is returned unchanged. This
+    preserves legacy behaviour (send all selected refs) and protects the
+    automation safety net that injects selected assets into a clip whose
+    agent-written prompt may not name them.
+
+    Returns ``(possibly_rewritten_prompt, possibly_filtered_user_refs)``.
+    """
+    referenced = {int(n) for n in re.findall(r"@image(\d+)", prompt)}
+    if not referenced:
+        return prompt, user_refs
+
+    # Keep only the user reference whose slot number the prompt names.
+    kept = [ref for i, ref in enumerate(user_refs) if (i + 1 + offset) in referenced]
+    # If the prompt names @imageN but none map to a real slot (all overflow),
+    # fall back to legacy behaviour rather than sending zero references.
+    if not kept:
+        return prompt, user_refs
+
+    # Build old-slot -> new-slot mapping. The starting frame (when present)
+    # always keeps @image1; surviving user refs then fill the next contiguous
+    # slots in selection order, so the reduced list is dense and the rewritten
+    # prompt still points at the right images.
+    old_to_new: dict[int, int] = {}
+    next_slot = 1
+    if offset == 1:
+        old_to_new[1] = 1  # the starting frame occupies @image1
+        next_slot = 2
+    for i, _ref in enumerate(user_refs):
+        old_slot = i + 1 + offset
+        if old_slot in referenced:
+            old_to_new[old_slot] = next_slot
+            next_slot += 1
+
+    def _sub(match: re.Match[str]) -> str:
+        new = old_to_new.get(int(match.group(1)))
+        return f"@image{new}" if new is not None else match.group(0)
+
+    new_prompt = re.sub(r"@image(\d+)", _sub, prompt)
+    return new_prompt, kept
+
+
 def _generate_single_clip(
     folder: str,
     clip_spec: dict,
@@ -366,14 +418,22 @@ def _generate_single_clip(
     ref_ids = [r for r in clip_spec.get("references", []) if r != clip_spec.get("startImageExport")]
     user_refs = _resolve_brand_assets(folder, ref_ids)
 
-    # Safety net: check for @imageN overflow in the prompt. The prompt may
-    # reference @image1, @image2, etc. — if N exceeds the total available
-    # reference images, the model will try to render an image it doesn't have.
-    # We count: 1 for the last frame (if present) + len(user_refs).
+    # Authoritative reference filtering: when the prompt names @imageN tokens,
+    # send ONLY the references it names, renumbered to a contiguous list. When a
+    # starting frame is present it occupies @image1, so user refs start at
+    # @image2 (offset=1); otherwise @image1 (offset=0). When the prompt names no
+    # @imageN tokens we send every selected ref (legacy behaviour — also
+    # protects the automation asset-injection safety net).
+    offset = 1 if frame_path else 0
+    prompt, user_refs = _filter_refs_by_prompt(prompt, user_refs, offset)
+
+    # Safety net: warn about @imageN overflow the prompt still references after
+    # filtering (e.g. @image5 when only 2 slots exist). Non-fatal — the model
+    # will simply lack that image.
     total_ref_slots = (1 if frame_path else 0) + len(user_refs)
     if total_ref_slots > 0:
-        referenced = re.findall(r"@image(\d+)", prompt)
-        overflow = [int(n) for n in referenced if int(n) > total_ref_slots]
+        referenced = {int(n) for n in re.findall(r"@image(\d+)", prompt)}
+        overflow = [n for n in sorted(referenced) if n > total_ref_slots]
         if overflow:
             S.append_memory(
                 folder,
